@@ -28,9 +28,9 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
       small: true
     })
   }
-}).on('login', (contact: Contact) => {
-  log.info(PRE, `user login, info: ${JSON.stringify(contact)}`)
-}).on('ready', async () => {
+}).on('login', async (user: Contact) => {
+  log.info(PRE, `user login, info: ${JSON.stringify(user)}`)
+
   const room = await bot.Room.find({id: config.workingRoomId})
   const contact = await bot.Contact.find({id: config.alarmReceiver})
   if (!room) {
@@ -42,6 +42,8 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
   }
   log.info(PRE, `data ready, start listening to room ${room}`)
   roomWorker = new RoomWorker(bot, room, contact)
+}).on('ready', async () => {
+  // 
 }).on('error', (error: Error) => {
   log.error(PRE, `error: ${error.stack}}`)
 })
