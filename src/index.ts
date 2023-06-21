@@ -1,19 +1,16 @@
-import { WechatyBuilder, log } from '@juzi/wechaty'
+import { Contact, Message, WechatyBuilder, log, types } from '@juzi/wechaty'
 import { ScanStatus } from '@juzi/wechaty-puppet/types'
 import QrcodeTerminal from 'qrcode-terminal'
 import PuppetPadplus from '@juzi/wechaty-puppet-padplus'
 
-import {
-  token,
-  endpoint,
-} from './config'
-import { ContactInterface, MessageInterface } from '@juzi/wechaty/impls'
+import { config } from './config'
+import { RoomWorker } from './services/RoomWorker'
 
 const PRE = 'Index'
 
 const puppet = new PuppetPadplus({
-  token,
-  endpoint,
+  token: config.token,
+  endpoint: config.endpoint,
   tls: {
     disable: true
   }
@@ -23,18 +20,28 @@ const bot = WechatyBuilder.build({
   name: 'arknova-ob',
 })
 
+let roomWorker: RoomWorker
+
 bot.on('scan', (qrcode: string, status: ScanStatus) => {
   if (status === ScanStatus.Waiting) {
     QrcodeTerminal.generate(qrcode, {
       small: true
     })
   }
-}).on('login', (contact: ContactInterface) => {
+}).on('login', (contact: Contact) => {
   log.info(PRE, `user login, info: ${JSON.stringify(contact)}`)
-}).on('ready', () => {
-  log.info(PRE, `data ready, start listening`)
-}).on('message', (message: MessageInterface) => {
-  log.info(PRE, `message received, payload: ${JSON.stringify(message.payload)}`)
+}).on('ready', async () => {
+  const room = await bot.Room.find({id: config.workingRoomId})
+  const contact = await bot.Contact.find({id: config.alarmReceiver})
+  if (!room) {
+    log.error(PRE, `cannot find the target room, will do nothing`)
+    if (contact) {
+      contact.say('cannot find working room, please check id')
+    }
+    return
+  }
+  log.info(PRE, `data ready, start listening to room ${room}`)
+  roomWorker = new RoomWorker(bot, room, contact)
 }).on('error', (error: Error) => {
   log.error(PRE, `error: ${error.stack}}`)
 })
