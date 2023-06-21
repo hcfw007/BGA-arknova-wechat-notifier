@@ -1,10 +1,10 @@
-import { Contact, Message, WechatyBuilder, log, types } from '@juzi/wechaty'
+import { Contact, WechatyBuilder, log } from '@juzi/wechaty'
 import { ScanStatus } from '@juzi/wechaty-puppet/types'
 import QrcodeTerminal from 'qrcode-terminal'
 import PuppetPadplus from '@juzi/wechaty-puppet-padplus'
 
 import { config } from './config'
-import { RoomWorker } from './services/RoomWorker'
+import { RoomWorker } from './services/roomWorker'
 
 const PRE = 'Index'
 
@@ -45,6 +45,10 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
 }).on('ready', async () => {
   // 
 }).on('error', (error: Error) => {
+  if (/getContact(\d+@openim)/.test(error.message)) {
+    // ignore openIm Contact Error
+    return
+  }
   log.error(PRE, `error: ${error.stack}}`)
 })
 
