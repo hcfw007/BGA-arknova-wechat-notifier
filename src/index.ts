@@ -45,7 +45,7 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
 }).on('ready', async () => {
   // 
 }).on('error', (error: Error) => {
-  if (/getContact(\d+@openim)/.test(error.message)) {
+  if (/getContact\(\d+@openim\) is not supported for IM contact/.test(error.message)) {
     // ignore openIm Contact Error
     return
   }
@@ -53,3 +53,11 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
 })
 
 bot.start()
+
+process.on('uncaughtException', (error: Error) => {
+  log.error(PRE, `uncaughtException: ${error.stack}}`)
+})
+
+process.on('unhandledRejection', (reason: Error) => {
+  log.error(PRE, `unhandledRejection: ${reason.stack}}`)
+})
