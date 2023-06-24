@@ -20,19 +20,19 @@ export class RoomWorker {
 
   tableObserveList: TableObserve[] = []
   
-  constructor(private readonly bot: Wechaty, private readonly room: Room, private readonly contact?: Contact) {
+  constructor(private readonly bot: Wechaty, private readonly contact?: Contact) {
     this.bot.on('message', (message: Message) => {
       if (message.type() !== types.Message.Text) {
         this.logger.verbose('non-text message will be ignored')
       }
-      if (message.talker() === this.contact) {
-        void this.handleAdminMessage(message)
-        return
-      }
-      if (message.room() === this.room) {
+      if (message.room()) {
         void this.handleRoomMessage(message)
         return
       }
+      if (message.talker() === this.contact) {
+        void this.handleAdminMessage(message)
+        return
+      }  
       this.logger.verbose('message from others will be ignored')
     })
   }
@@ -62,13 +62,11 @@ export class RoomWorker {
     const tableObserve = this.tableObserveList.find(ob => ob.tableId === tableId)
     if (tableObserve) {
       if (tableObserve.subscribers.includes(reportTarget)) {
-        reportTarget.say(`You are already observing table ${tableId}`)
+        reportTarget.say(`已经在观察 ${tableId}了 `)
       } else {
         tableObserve.subscribers.push(reportTarget)
       }
-
-      // TODO: Report current table status to target
-
+      this.sendCurrentState(tableObserve)
       return
     }
 
@@ -97,6 +95,7 @@ export class RoomWorker {
           this.logger.error(`messageSendError, ${e.stack}`)
         })
       })
+      this.sendCurrentPlayers(tableObserve)
     }).on('end', () => {
       tableObserve.observer.close()
       tableObserve.subscribers.forEach(target => {
@@ -105,13 +104,37 @@ export class RoomWorker {
         })
       })
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
+    }).on('newPlayerMove', () => {
+      this.sendCurrentPlayers(tableObserve)
     })
   }
 
   sendCurrentState(tableObserve: TableObserve) {
-    const currentState = tableObserve.observer.currentState
+    const currentState = tableObserve.observer.currentState    
     tableObserve.subscribers.forEach(target => {
       target.say(`游戏桌${tableObserve.tableId}当前状态为 ${currentState}`).catch((e: Error) => {
+        this.logger.error(`messageSendError, ${e.stack}`)
+      })
+    })
+  }
+
+  sendCurrentPlayers(tableObserve: TableObserve) {
+    let str = '现在轮到'
+    const players = tableObserve.observer.currentPlayers
+    const contacts = []
+    for (const player of players || []) {
+      str += `${player}`
+      const contact = tableObserve.observer.getContactFromPlayer(player)
+      if (contact) {
+        str += `(${contact.name()})`
+        contacts.push(contact)
+      }
+    }
+
+    tableObserve.subscribers.forEach(target => {
+      target.say(str, {
+        mentionList: contacts
+      }).catch((e: Error) => {
         this.logger.error(`messageSendError, ${e.stack}`)
       })
     })

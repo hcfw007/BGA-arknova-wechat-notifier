@@ -1,7 +1,6 @@
 const requiredConfig: Record<string, string> = {
   token: process.env.PADPLUS_TOKEN,
   endpoint: process.env.PADPLUS_ENDPOINT,
-  workingRoomId: process.env.WORKING_ROOM_ID,
 } 
 
 const optionalConfig: Record<string, string> = {

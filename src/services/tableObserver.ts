@@ -119,8 +119,19 @@ export class TableObserver extends EventEmitter {
       await this.chromeTab.reload()
     }
   }
+
+  getContactFromPlayer(player: string) {
+    if (this.playerMap) {
+      return this.playerMap[player]
+    }
+  }
 }
 
 export interface PlayerMap {
   [gameName: string]: Contact
+}
+
+export interface ContactPlayer {
+  contact: Contact,
+  gameName: string,
 }
