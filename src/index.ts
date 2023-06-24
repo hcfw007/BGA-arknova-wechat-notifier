@@ -42,6 +42,10 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
   }
   log.info(PRE, `data ready, start listening to room ${room}`)
   roomWorker = new RoomWorker(bot, room, contact)
+
+  setImmediate(() => {
+    roomWorker.subscribeTable('389308154', contact)
+  })
 }).on('ready', async () => {
   // 
 }).on('error', (error: Error) => {

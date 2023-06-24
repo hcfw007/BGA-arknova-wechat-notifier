@@ -18,11 +18,7 @@ export class RoomWorker {
     return this._browser
   }
 
-  tableObserveList: {
-    tableId: string,
-    subscribers: (Contact | Room)[],
-    observer: TableObserver,
-  }[] = []
+  tableObserveList: TableObserve[] = []
   
   constructor(private readonly bot: Wechaty, private readonly room: Room, private readonly contact?: Contact) {
     this.bot.on('message', (message: Message) => {
@@ -79,16 +75,43 @@ export class RoomWorker {
     const browser = await this.getBrowserInstance()
     const page = await browser.newPage()
 
-    await page.goto(`https://en.boardgamearena.com/6/arknova?table=${tableId}`)
-
+    const ob = new TableObserver(tableId, page)
     const newTableObserve = {
       tableId,
       subscribers: [reportTarget],
-      observer: new TableObserver(tableId, page)
+      observer: ob
     }
 
     this.tableObserveList.push(newTableObserve)
     // TODO: create a ob and setup listeners
 
+    this.bindEvents(newTableObserve)
+
+    await ob.init()
   }
+
+  bindEvents(tableObserve: TableObserve) {
+    tableObserve.observer.on('ready', () => {
+      tableObserve.subscribers.forEach(target => {
+        target.say(`成功OB游戏桌${tableObserve.tableId}，当前状态为${tableObserve.observer.currentState}`).catch((e: Error) => {
+          this.logger.error(`messageSendError, ${e.stack}`)
+        })
+      })
+    })
+  }
+
+  sendCurrentState(tableObserve: TableObserve) {
+    const currentState = tableObserve.observer.currentState
+    tableObserve.subscribers.forEach(target => {
+      target.say(`游戏桌${tableObserve.tableId}当前状态为 ${currentState}`).catch((e: Error) => {
+        this.logger.error(`messageSendError, ${e.stack}`)
+      })
+    })
+  }
+}
+
+export interface TableObserve {
+  tableId: string,
+  subscribers: (Contact | Room)[],
+  observer: TableObserver,
 }
