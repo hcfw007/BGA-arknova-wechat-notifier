@@ -97,6 +97,14 @@ export class RoomWorker {
           this.logger.error(`messageSendError, ${e.stack}`)
         })
       })
+    }).on('end', () => {
+      tableObserve.observer.close()
+      tableObserve.subscribers.forEach(target => {
+        target.say(`游戏桌${tableObserve.tableId}已结束，停止OB`).catch((e: Error) => {
+          this.logger.error(`messageSendError, ${e.stack}`)
+        })
+      })
+      this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
     })
   }
 

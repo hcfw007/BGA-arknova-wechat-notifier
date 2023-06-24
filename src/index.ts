@@ -44,7 +44,7 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
   roomWorker = new RoomWorker(bot, room, contact)
 
   setImmediate(() => {
-    roomWorker.subscribeTable('389308154', contact)
+    roomWorker.subscribeTable('388014235', contact)
   })
 }).on('ready', async () => {
   // 

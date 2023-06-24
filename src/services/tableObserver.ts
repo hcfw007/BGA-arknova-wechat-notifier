@@ -11,6 +11,7 @@ export class TableObserver extends EventEmitter {
   mainTitleEle?: ElementHandle
   currentState?: string
   currentPlayers?: string[]
+  reloadCheckTimer?: NodeJS.Timer
 
   constructor (private readonly tableId: string, private readonly chromeTab: Page, private readonly playerMap: PlayerMap = {}) {
     super()
@@ -23,6 +24,12 @@ export class TableObserver extends EventEmitter {
       
       this.chromeTab.$('#pagemaintitletext').then(async (ele: (ElementHandle | null)) => {
         if (!ele) {
+          const gameEndSpan = await this.chromeTab.$('#status_detailled')
+          if (gameEndSpan && (await gameEndSpan.evaluate(el => el.textContent)).includes('has ended')) {
+            gameEndSpan.dispose()
+            this.emit('end')
+            return
+          }
           throw new Error('fail to get main title')
         }
         this.mainTitleEle = ele
@@ -43,7 +50,16 @@ export class TableObserver extends EventEmitter {
       }
     })
 
-    this.chromeTab.goto(`https://en.boardgamearena.com/6/arknova?table=${this.tableId}`)
+    await this.chromeTab.goto(`https://en.boardgamearena.com/6/arknova?table=${this.tableId}`)
+    this.startCheckReload()
+  }
+
+  close() {
+    this.mainTitleEle?.dispose()
+    this.chromeTab.close()
+    this.stopCheckReload()
+    this.pageReady = false
+    this.mainTitleEle = undefined
   }
 
   async handleBGAWsMessage(data: string) {
@@ -64,10 +80,44 @@ export class TableObserver extends EventEmitter {
     const playerSpans = await this.mainTitleEle.$$('span')
     const playerNames = await Promise.all(playerSpans.map(span => span.evaluate(el => el.textContent)))
     playerSpans.map(span => span.dispose())
+
+    const previousPlayers = this.currentPlayers
+    const previousState = this.currentState
+
     this.currentPlayers = playerNames
     this.currentState = state
-    console.log('currentState', state)
-    console.log('currentPlayers', playerNames)
+
+    if (previousPlayers) {
+      const previousPlayersSet = new Set(previousPlayers)
+      const newPlayers = this.currentPlayers.filter(player => !previousPlayersSet.has(player))
+      if (newPlayers && this.currentState.includes('must')) {
+        this.emit('newPlayerMove', newPlayers)
+      }
+    }
+
+    if (this.currentState.includes('game ended')) {
+      this.emit('end')
+    }
+  }
+
+  startCheckReload() {
+    if (!this.reloadCheckTimer) {
+      this.reloadCheckTimer = setInterval(this.checkReload.bind(this), 10 * 1000)
+    }
+  }
+
+  stopCheckReload() {
+    if (this.reloadCheckTimer) {
+      clearInterval(this.reloadCheckTimer)
+      this.reloadCheckTimer = undefined
+    }
+  }
+
+  async checkReload() {
+    const reloadPopup = await this.chromeTab.$('bga-popup-modal__content')
+    if (reloadPopup) {
+      await this.chromeTab.reload()
+    }
   }
 }
 
