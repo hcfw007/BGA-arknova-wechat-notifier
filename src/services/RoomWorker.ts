@@ -1,8 +1,8 @@
 import { Contact, Message, Room, Wechaty, types } from "@juzi/wechaty"
 import puppeteer, { Browser, Page } from "puppeteer"
-import { Logger } from "src/helpers/logger"
+import { Logger } from "../helpers/logger"
 import { TableObserver } from "./TableObserver"
-import { config } from "src/config"
+import { config } from "../config"
 
 export class RoomWorker {
 
@@ -54,9 +54,12 @@ export class RoomWorker {
   }
 
   async handleRoomMessage(message: Message) {
+    // if (!await message.mentionSelf()) {
+    //   return
+    // }
     const text = message.text()
 
-    if (/^观察 \d+$/.test(text) || /^ob \d+$/.test(text)) {
+    if (/观察 \d+$/.test(text) || /ob \d+$/.test(text)) {
       const table = /\d+$/.exec(text)[0]
       return this.subscribeTable(table, message.room())
     }
@@ -73,6 +76,7 @@ export class RoomWorker {
         tableObserve.subscribers.push(reportTarget)
       }
       this.sendCurrentState(tableObserve)
+      this.sendCurrentPlayers(tableObserve)
       return
     }
 
@@ -84,7 +88,7 @@ export class RoomWorker {
       playerMap[bgaName] = await this.bot.Contact.find({id: config.playerMap[bgaName]})
     }
 
-    const ob = new TableObserver(tableId, page)
+    const ob = new TableObserver(tableId, page, playerMap)
     const newTableObserve = {
       tableId,
       subscribers: [reportTarget],
@@ -143,6 +147,7 @@ export class RoomWorker {
     }
 
     tableObserve.subscribers.forEach(target => {
+      this.logger.info(`saying ${str} to ${target}, mentioning ${contacts}`)
       target.say(str, {
         mentionList: contacts
       }).catch((e: Error) => {
