@@ -76,7 +76,7 @@ export class TableObserver extends EventEmitter {
   }
 
   async getCurrentState() {
-    const state = await this.mainTitleEle.evaluate(el => el.textContent)
+    const state = (await this.mainTitleEle.evaluate(el => el.textContent)).trim()
     const playerSpans = await this.mainTitleEle.$$('span')
     const playerNames = await Promise.all(playerSpans.map(span => span.evaluate(el => el.textContent)))
     playerSpans.map(span => span.dispose())
@@ -90,6 +90,8 @@ export class TableObserver extends EventEmitter {
       this.currentPlayers = playerNames
     }
     this.currentState = state
+
+    this.logger.info(`state update: ${this.currentState}, players: ${JSON.stringify(this.currentPlayers)}`)
 
     if (previousPlayers) {
       const previousPlayersSet = new Set(previousPlayers)
