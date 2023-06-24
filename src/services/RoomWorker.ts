@@ -2,6 +2,7 @@ import { Contact, Message, Room, Wechaty, types } from "@juzi/wechaty"
 import puppeteer, { Browser, Page } from "puppeteer"
 import { Logger } from "src/helpers/logger"
 import { TableObserver } from "./TableObserver"
+import { config } from "src/config"
 
 export class RoomWorker {
 
@@ -53,7 +54,12 @@ export class RoomWorker {
   }
 
   async handleRoomMessage(message: Message) {
-    // TODO
+    const text = message.text()
+
+    if (/^观察 \d+$/.test(text) || /^ob \d+$/.test(text)) {
+      const table = /\d+$/.exec(text)[0]
+      return this.subscribeTable(table, message.room())
+    }
   }
 
   async subscribeTable(tableId: string, reportTarget: Contact | Room) {
@@ -72,6 +78,11 @@ export class RoomWorker {
 
     const browser = await this.getBrowserInstance()
     const page = await browser.newPage()
+
+    const playerMap = {}
+    for (const bgaName in config.playerMap) {
+      playerMap[bgaName] = await this.bot.Contact.find({id: config.playerMap[bgaName]})
+    }
 
     const ob = new TableObserver(tableId, page)
     const newTableObserve = {
@@ -126,8 +137,8 @@ export class RoomWorker {
       str += `${player}`
       const contact = tableObserve.observer.getContactFromPlayer(player)
       if (contact) {
-        str += `(${contact.name()})`
-        contacts.push(contact)
+        str += `(${contact === 'all' ? '所有人' : contact.name()})`
+        contacts.push(contact === 'all' ? '@all' : contact)
       }
     }
 

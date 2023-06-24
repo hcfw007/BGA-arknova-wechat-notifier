@@ -84,7 +84,11 @@ export class TableObserver extends EventEmitter {
     const previousPlayers = this.currentPlayers
     const previousState = this.currentState
 
-    this.currentPlayers = playerNames
+    if (playerNames.length === 0 && state.includes('All players')) {
+      this.currentPlayers = ['all']
+    } else {
+      this.currentPlayers = playerNames
+    }
     this.currentState = state
 
     if (previousPlayers) {
@@ -119,8 +123,11 @@ export class TableObserver extends EventEmitter {
       await this.chromeTab.reload()
     }
   }
-
+  
   getContactFromPlayer(player: string) {
+    if (player === 'all') {
+      return 'all'
+    }
     if (this.playerMap) {
       return this.playerMap[player]
     }
