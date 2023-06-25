@@ -36,11 +36,6 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
   log.info(PRE, `data ready, start listening to contact ${contact}`)
   if (!roomWorker) {
     roomWorker = new RoomWorker(bot, contact)
-
-    // TODO: remove test code
-    setImmediate(() => {
-      roomWorker.subscribeTable('389308154', contact)
-    })
   }
 
 }).on('ready', async () => {
