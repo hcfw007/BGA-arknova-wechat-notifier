@@ -4,7 +4,7 @@ import QrcodeTerminal from 'qrcode-terminal'
 import PuppetPadplus from '@juzi/wechaty-puppet-padplus'
 
 import { config } from './config'
-import { RoomWorker } from './services/roomWorker'
+import { RoomWorker } from './service/roomWorker'
 
 const PRE = 'Index'
 
