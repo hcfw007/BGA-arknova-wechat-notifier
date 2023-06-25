@@ -11,6 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      
+      - name: Setup NodeJS
+        uses: actions/setup-node@v1
+        with:
+          node-version: 18.13.0
+    
+      - name: Instal
+        run: npm install
+
+      - name: Build
+        run: npm run dist
 
       - name: Login to DockerHub Registry
         run: echo ${{ secrets.DOCKER_PERSONAL_ACCESS_TOKEN }} | docker login -u hcfw007 --password-stdin
