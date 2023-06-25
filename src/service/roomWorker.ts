@@ -1,6 +1,6 @@
 import { Contact, Message, Room, Wechaty, types } from "@juzi/wechaty"
 import puppeteer, { Browser, Page } from "puppeteer"
-import { Logger } from "../helpers/logger"
+import { Logger } from "../helper/logger"
 import { TableObserver } from "./TableObserver"
 import { config } from "../config"
 

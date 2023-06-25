@@ -1,7 +1,7 @@
 import { Contact } from "@juzi/wechaty"
 import EventEmitter from "events"
 import { ElementHandle, Page } from "puppeteer"
-import { Logger } from "../helpers/logger"
+import { Logger } from "../helper/logger"
 
 export class TableObserver extends EventEmitter {
 
