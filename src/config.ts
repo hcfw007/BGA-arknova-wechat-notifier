@@ -1,11 +1,12 @@
-const requiredConfig: Record<string, string> = {
+const requiredConfig = {
   token: process.env.PADPLUS_TOKEN,
   endpoint: process.env.PADPLUS_ENDPOINT,
-} 
+} as const
 
-const optionalConfig: Record<string, string> = {
+const optionalConfig = {
   alarmReceiver: process.env.ALARM_CONTACT_ID,
-}
+  puppetHeadless: !(process.env.PUPPET_HEADLESS === 'false')
+} as const
 
 for (const key in requiredConfig) {
   if (typeof requiredConfig[key] === 'undefined') {
@@ -28,4 +29,4 @@ export const config = {
   ...requiredConfig,
   ...optionalConfig,
   playerMap,
-} as any
+} as const

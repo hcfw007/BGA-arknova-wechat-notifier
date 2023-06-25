@@ -4,7 +4,10 @@ RUN apk -u add --no-cache python3 gcc make g++
 
 WORKDIR /app
 
-COPY ./dist ./dist
-COPY ./node_modules ./node_modules
+COPY . .
+
+RUN npm install
+RUN npm install typescript -g
+RUN npm run dist
 
 ENTRYPOINT node ./dist/index.js
