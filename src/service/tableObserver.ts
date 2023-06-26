@@ -103,7 +103,7 @@ export class TableObserver extends EventEmitter {
       }
     }
 
-    if (this.currentState.includes('game ended')) {
+    if (this.currentState.includes('End of game')) {
       this.emit('end')
     }
   }
