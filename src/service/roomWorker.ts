@@ -13,7 +13,8 @@ export class RoomWorker {
   async getBrowserInstance() {
     if (!this._browser) {
       this._browser = await puppeteer.launch({
-        headless: config.puppetHeadless
+        headless: config.puppetHeadless,
+        args: ['--no-sandbox']
       })
     }
     return this._browser
