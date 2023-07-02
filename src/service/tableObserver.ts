@@ -50,7 +50,7 @@ export class TableObserver extends EventEmitter {
       }
     })
 
-    await this.chromeTab.goto(`https://en.boardgamearena.com/6/arknova?table=${this.tableId}`)
+    await this.chromeTab.goto(`https://en.boardgamearena.com/10/arknova?table=${this.tableId}`)
     this.startCheckReload()
   }
 
@@ -110,7 +110,7 @@ export class TableObserver extends EventEmitter {
 
   startCheckReload() {
     if (!this.reloadCheckTimer) {
-      this.reloadCheckTimer = setInterval(this.checkReload.bind(this), 10 * 1000)
+      this.reloadCheckTimer = setInterval(this.checkReload.bind(this), 60 * 1000)
     }
   }
 
@@ -122,9 +122,12 @@ export class TableObserver extends EventEmitter {
   }
 
   async checkReload() {
-    const reloadPopup = await this.chromeTab.$('bga-popup-modal__content')
+    const reloadPopup = await this.chromeTab.$('.bga-popup-modal__content')
     if (reloadPopup) {
+      this.logger.info('check reload: page dead')
       await this.chromeTab.reload()
+    } else {
+      this.logger.info('check reload: page alive')
     }
   }
   
