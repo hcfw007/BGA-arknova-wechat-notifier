@@ -8,7 +8,6 @@ export class TableObserver extends EventEmitter {
   private readonly logger = new Logger(TableObserver.name)
 
   pageReady = false
-  mainTitleEle?: ElementHandle
   currentState?: string
   currentPlayers?: string[]
   reloadCheckTimer?: NodeJS.Timer
@@ -18,27 +17,6 @@ export class TableObserver extends EventEmitter {
   }
 
   async init() {
-
-    this.chromeTab.once('load', () => {
-      this.pageReady = true
-      
-      this.chromeTab.$('#pagemaintitletext').then(async (ele: (ElementHandle | null)) => {
-        if (!ele) {
-          const gameEndSpan = await this.chromeTab.$('#status_detailled')
-          if (gameEndSpan && (await gameEndSpan.evaluate(el => el.textContent)).includes('has ended')) {
-            gameEndSpan.dispose()
-            this.emit('end')
-            return
-          }
-          throw new Error('fail to get main title')
-        }
-        this.mainTitleEle = ele
-        await this.getCurrentState()
-
-        this.emit('ready')
-      })
-
-    })
 
     const client = await this.chromeTab.target().createCDPSession()
     await client.send('Network.enable')
@@ -50,16 +28,34 @@ export class TableObserver extends EventEmitter {
       }
     })
 
-    await this.chromeTab.goto(`https://en.boardgamearena.com/10/arknova?table=${this.tableId}`)
-    this.startCheckReload()
+    await this.chromeTab.goto(`https://en.boardgamearena.com/table?table=${this.tableId}`)
+    const gotoButton = await this.chromeTab.$('#access_game_normal')
+    await gotoButton.click()
+
+    this.chromeTab.once('load', async () => {
+      const mainTitleEleSpan = await this.chromeTab.$('#pagemaintitletext')
+      if (!mainTitleEleSpan) {
+        const gameEndSpan = await this.chromeTab.$('#status_detailled')
+          if (gameEndSpan && (await gameEndSpan.evaluate(el => el.textContent)).includes('has ended')) {
+            gameEndSpan.dispose()
+            this.emit('end')
+            return
+          }
+      }
+
+      await this.getCurrentState()
+
+      this.emit('ready')
+      this.pageReady = true
+      this.startCheckReload()
+    })
+    
   }
 
   close() {
-    this.mainTitleEle?.dispose()
     this.chromeTab.close()
     this.stopCheckReload()
     this.pageReady = false
-    this.mainTitleEle = undefined
   }
 
   async handleBGAWsMessage(data: string) {
@@ -76,8 +72,13 @@ export class TableObserver extends EventEmitter {
   }
 
   async getCurrentState() {
-    const state = (await this.mainTitleEle.evaluate(el => el.textContent)).trim()
-    const playerSpans = await this.mainTitleEle.$$('span')
+    if (!this.pageReady) {
+      this.logger.info('trying to get state when page not ready, ignored')
+    }
+    const mainTitleEleSpan = await this.chromeTab.$('#pagemaintitletext')
+
+    const state = (await mainTitleEleSpan.evaluate(el => el.textContent)).trim()
+    const playerSpans = await mainTitleEleSpan.$$('span')
     const playerNames = await Promise.all(playerSpans.map(span => span.evaluate(el => el.textContent)))
     playerSpans.map(span => span.dispose())
 
