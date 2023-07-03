@@ -107,8 +107,9 @@ export class TableObserver extends EventEmitter {
       this.playerIdMap[key].busy = visibility
     }
 
-    if (!busyPlayers) {
-      busyPlayers.length === 0
+    if (busyPlayers.length === 0) {
+      this.logger.info(`state: ${this.currentState}, no busy players, will not update`)
+      return
     }
     const previousPlayers = this.currentPlayers
 
@@ -128,14 +129,14 @@ export class TableObserver extends EventEmitter {
       }
     }
 
-    if (this.currentState.includes('End of game')) {
+    if (this.currentState.includes('End of game') && !this.currentState.includes('triggered')) {
       this.emit('end')
     }
   }
 
   startCheckReload() {
     if (!this.reloadCheckTimer) {
-      this.reloadCheckTimer = setInterval(this.checkReload.bind(this), 60 * 1000)
+      this.reloadCheckTimer = setInterval(this.checkReload.bind(this), 30 * 1000)
     }
   }
 
@@ -154,6 +155,7 @@ export class TableObserver extends EventEmitter {
     } else {
       this.logger.info('check reload: page alive')
     }
+    await this.getCurrentState()
   }
   
   getContactFromPlayer(player: string) {
