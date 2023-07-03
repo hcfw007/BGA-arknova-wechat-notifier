@@ -108,7 +108,10 @@ export class TableObserver extends EventEmitter {
     }
 
     if (busyPlayers.length === 0) {
-      this.logger.info(`state: ${this.currentState}, no busy players, will not update`)
+      this.logger.info(`state: ${state}, no busy players, will not update unless it's ended`)
+      if (state.includes('End of game') && !state.includes('triggered')) {
+        this.emit('end')
+      }
       return
     }
     const previousPlayers = this.currentPlayers
