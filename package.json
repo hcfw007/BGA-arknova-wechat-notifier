@@ -1,6 +1,6 @@
 {
   "name": "bga-arknova-wechat-notifier",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "@you in a wechat room when it's your turn in BGA arknova",
   "main": "index.js",
   "scripts": {
