@@ -79,8 +79,7 @@ export class RoomWorker {
 
       if (tableObserve.observer.pageReady) {
         // 已经 ready 的桌子，补发
-        this.sendCurrentState(tableObserve)
-        this.sendCurrentPlayers(tableObserve)
+        this.reportCurrentState(tableObserve)
       }
       
       return
