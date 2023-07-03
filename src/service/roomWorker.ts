@@ -76,8 +76,13 @@ export class RoomWorker {
       } else {
         tableObserve.subscribers.push(reportTarget)
       }
-      this.sendCurrentState(tableObserve)
-      this.sendCurrentPlayers(tableObserve)
+
+      if (tableObserve.observer.pageReady) {
+        // 已经 ready 的桌子，补发
+        this.sendCurrentState(tableObserve)
+        this.sendCurrentPlayers(tableObserve)
+      }
+      
       return
     }
 
@@ -112,6 +117,7 @@ export class RoomWorker {
         })
       })
       this.sendCurrentPlayers(tableObserve)
+      this.sendCurrentState(tableObserve)
     }).on('end', () => {
       tableObserve.observer.close()
       tableObserve.subscribers.forEach(target => {

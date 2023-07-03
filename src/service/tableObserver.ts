@@ -11,6 +11,13 @@ export class TableObserver extends EventEmitter {
   currentState?: string
   currentPlayers?: string[]
   reloadCheckTimer?: NodeJS.Timer
+  
+  playerIdMap: {
+    [name: string]: {
+      busy?: boolean
+      id: string,
+    }
+  } = {}
 
   constructor (private readonly tableId: string, private readonly chromeTab: Page, private readonly playerMap: PlayerMap = {}) {
     super()
@@ -29,24 +36,29 @@ export class TableObserver extends EventEmitter {
     })
 
     await this.chromeTab.goto(`https://en.boardgamearena.com/table?table=${this.tableId}`)
-    const gotoButton = await this.chromeTab.$('#access_game_normal')
-    await gotoButton.click()
+
+    const tableStatusEle = await this.chromeTab.$('#status_detailled')
+    const tableStatus = await tableStatusEle.evaluate(el => el.textContent)
+    if (tableStatus === 'Game has ended') {
+      this.emit('end')
+      return
+    }
+    const gotoButtonEle = await this.chromeTab.$('#access_game_normal')
+    await gotoButtonEle.click()
 
     this.chromeTab.once('load', async () => {
-      const mainTitleEleSpan = await this.chromeTab.$('#pagemaintitletext')
-      if (!mainTitleEleSpan) {
-        const gameEndSpan = await this.chromeTab.$('#status_detailled')
-          if (gameEndSpan && (await gameEndSpan.evaluate(el => el.textContent)).includes('has ended')) {
-            gameEndSpan.dispose()
-            this.emit('end')
-            return
-          }
+      const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
+      if (!mainTitleEle) {
+        this.logger.info('failed to find main title element')
+        this.emit('end')
       }
 
+      await this.initPlayerIdMap()
+      console.log('init player id map', this.playerIdMap)
       await this.getCurrentState()
-
-      this.emit('ready')
+      console.log('load currents state', this.playerIdMap)
       this.pageReady = true
+      this.emit('ready')
       this.startCheckReload()
     })
     
@@ -75,21 +87,31 @@ export class TableObserver extends EventEmitter {
     if (!this.pageReady) {
       this.logger.info('trying to get state when page not ready, ignored')
     }
-    const mainTitleEleSpan = await this.chromeTab.$('#pagemaintitletext')
-
-    const state = (await mainTitleEleSpan.evaluate(el => el.textContent)).trim()
-    const playerSpans = await mainTitleEleSpan.$$('span')
-    const playerNames = await Promise.all(playerSpans.map(span => span.evaluate(el => el.textContent)))
-    playerSpans.map(span => span.dispose())
-
-    const previousPlayers = this.currentPlayers
-    const previousState = this.currentState
-
-    if (playerNames.length === 0 && state.includes('All players')) {
-      this.currentPlayers = ['all']
-    } else {
-      this.currentPlayers = playerNames
+    const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
+    if (!mainTitleEle) {
+      this.logger.info('failed to find main title element')
+      this.emit('end')
     }
+
+    const state = (await mainTitleEle.evaluate(el => el.textContent)).trim()
+
+    const busyPlayers = []
+    for (const key in this.playerIdMap) {
+      const activeDivEle = await this.chromeTab.$(`#avatar_active_wrap_${this.playerIdMap[key].id}`)
+      const visibility = await activeDivEle.evaluate(el => el.checkVisibility())
+      if (visibility) {
+        busyPlayers.push(key)
+      }
+      this.playerIdMap[key].busy = visibility
+    }
+
+    if (!busyPlayers) {
+      busyPlayers.length === 0
+    }
+    const previousPlayers = this.currentPlayers
+
+
+    this.currentPlayers = busyPlayers
     this.currentState = state
 
     this.logger.info(`state update: ${this.currentState}, players: ${JSON.stringify(this.currentPlayers)}`)
@@ -139,6 +161,24 @@ export class TableObserver extends EventEmitter {
     if (this.playerMap) {
       return this.playerMap[player]
     }
+  }
+
+  async initPlayerIdMap() {
+    const playerBoardEles = await this.chromeTab.$$('.player_board_inner')
+    const promises = playerBoardEles.map(async ele => {
+      const playerNameDivEle = await ele.$('.player-name')
+      const playerNameAEle = await ele.$('.player-name>a')
+      if (!playerNameAEle) {
+        return // spectator? 
+      }
+      const playerId = (await playerNameDivEle.evaluate(el => el.id)).slice('player_name_'.length)
+      const playerName = await playerNameAEle.evaluate(el => el.textContent)
+      this.playerIdMap[playerName] = {
+        id: playerId,
+        busy: false
+      }
+    })
+    await Promise.all(promises)
   }
 }
 
