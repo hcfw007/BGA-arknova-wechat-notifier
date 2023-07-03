@@ -2,6 +2,7 @@ import { Contact } from "@juzi/wechaty"
 import EventEmitter from "events"
 import { ElementHandle, Page } from "puppeteer"
 import { Logger } from "../helper/logger"
+import { stateRegulator } from "src/helper/util"
 
 export class TableObserver extends EventEmitter {
 
@@ -54,9 +55,7 @@ export class TableObserver extends EventEmitter {
       }
 
       await this.initPlayerIdMap()
-      console.log('init player id map', this.playerIdMap)
       await this.getCurrentState()
-      console.log('load currents state', this.playerIdMap)
       this.pageReady = true
       this.emit('ready')
       this.startCheckReload()
@@ -93,7 +92,7 @@ export class TableObserver extends EventEmitter {
       this.emit('end')
     }
 
-    const state = (await mainTitleEle.evaluate(el => el.textContent)).trim()
+    const state = stateRegulator(await mainTitleEle.evaluate(el => el.textContent))
 
     const busyPlayers = []
     for (const key in this.playerIdMap) {
