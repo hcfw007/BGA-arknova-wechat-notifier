@@ -117,8 +117,7 @@ export class RoomWorker {
           this.logger.error(`messageSendError, ${e.stack}`)
         })
       })
-      this.sendCurrentPlayers(tableObserve)
-      this.sendCurrentState(tableObserve)
+      this.reportCurrentState(tableObserve)
     }).on('end', () => {
       tableObserve.observer.close()
       tableObserve.subscribers.forEach(target => {
@@ -128,21 +127,11 @@ export class RoomWorker {
       })
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
     }).on('newPlayerMove', () => {
-      this.sendCurrentPlayers(tableObserve)
-      this.sendCurrentState(tableObserve)
+      this.reportCurrentState(tableObserve)
     })
   }
 
-  sendCurrentState(tableObserve: TableObserve) {
-    const currentState = tableObserve.observer.currentState    
-    tableObserve.subscribers.forEach(target => {
-      target.say(`游戏桌${tableObserve.tableId}当前状态为 ${currentState}`).catch((e: Error) => {
-        this.logger.error(`messageSendError, ${e.stack}`)
-      })
-    })
-  }
-
-  sendCurrentPlayers(tableObserve: TableObserve) {
+  reportCurrentState(tableObserve: TableObserve) {
     let str = '现在轮到'
     const players = tableObserve.observer.currentPlayers
     const contacts = []
@@ -155,6 +144,8 @@ export class RoomWorker {
       }
     }
 
+    const currentState = tableObserve.observer.currentState 
+    str += `，当前状态为 ${currentState}。`
     tableObserve.subscribers.forEach(target => {
       this.logger.info(`saying ${str} to ${target}, mentioning ${contacts}`)
       target.say(str, {
