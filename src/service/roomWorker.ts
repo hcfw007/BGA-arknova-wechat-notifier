@@ -111,6 +111,7 @@ export class RoomWorker {
 
   bindEvents(tableObserve: TableObserve) {
     tableObserve.observer.on('ready', () => {
+      this.logger.info(`table ${tableObserve.tableId} ready`)
       tableObserve.subscribers.forEach(target => {
         target.say(`成功OB游戏桌${tableObserve.tableId}，当前状态为${tableObserve.observer.currentState}`).catch((e: Error) => {
           this.logger.error(`messageSendError, ${e.stack}`)
@@ -128,6 +129,7 @@ export class RoomWorker {
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
     }).on('newPlayerMove', () => {
       this.sendCurrentPlayers(tableObserve)
+      this.sendCurrentState(tableObserve)
     })
   }
 

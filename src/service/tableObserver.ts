@@ -47,20 +47,22 @@ export class TableObserver extends EventEmitter {
     const gotoButtonEle = await this.chromeTab.$('#access_game_normal')
     await gotoButtonEle.click()
 
+
     this.chromeTab.once('load', async () => {
       const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
       if (!mainTitleEle) {
-        this.logger.info('failed to find main title element')
         this.emit('end')
+        return
       }
+
+      this.pageReady = true
 
       await this.initPlayerIdMap()
       await this.getCurrentState()
-      this.pageReady = true
+      
       this.emit('ready')
       this.startCheckReload()
     })
-    
   }
 
   close() {
@@ -85,6 +87,7 @@ export class TableObserver extends EventEmitter {
   async getCurrentState() {
     if (!this.pageReady) {
       this.logger.info('trying to get state when page not ready, ignored')
+      return
     }
     const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
     if (!mainTitleEle) {
