@@ -121,7 +121,7 @@ export class TableObserver extends EventEmitter {
     if (previousPlayers) {
       const previousPlayersSet = new Set(previousPlayers)
       const newPlayers = this.currentPlayers.filter(player => !previousPlayersSet.has(player))
-      if (newPlayers.length > 0 && this.currentState.includes('must')) {
+      if (newPlayers.length > 0) {
         this.logger.info(`new player event: ${newPlayers}`)
 
         this.emit('newPlayerMove', newPlayers)

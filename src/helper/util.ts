@@ -1,3 +1,3 @@
 export const stateRegulator = (state: string): string => {
-  return state.replace(/\n+/g, ' ').replace(/ +/g, ' ')
+  return state.replace(/\n+/g, ' ').replace(/ +/g, ' ').trim()
 }
