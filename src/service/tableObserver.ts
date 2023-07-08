@@ -36,7 +36,11 @@ export class TableObserver extends EventEmitter {
       }
     })
 
+    const future = new Promise(resolve => {
+      this.chromeTab.once('load', resolve)
+    })
     await this.chromeTab.goto(`https://en.boardgamearena.com/table?table=${this.tableId}`)
+    await future
 
     const tableStatusEle = await this.chromeTab.$('#status_detailled')
     const tableStatus = await tableStatusEle.evaluate(el => el.textContent)
