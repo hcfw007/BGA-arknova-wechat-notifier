@@ -127,6 +127,14 @@ export class RoomWorker {
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
     }).on('newPlayerMove', () => {
       this.reportCurrentState(tableObserve)
+    }).on('error', () => {
+      tableObserve.observer.close()
+      tableObserve.subscribers.forEach(target => {
+        target.say(`游戏桌${tableObserve.tableId}发生错误，停止OB`).catch((e: Error) => {
+          this.logger.error(`messageSendError, ${e.stack}`)
+        })
+      })
+      this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
     })
   }
 

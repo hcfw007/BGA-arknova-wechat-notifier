@@ -40,7 +40,6 @@ export class TableObserver extends EventEmitter {
       this.chromeTab.once('load', resolve)
     })
     await this.chromeTab.goto(`https://en.boardgamearena.com/table?table=${this.tableId}`)
-    await future
 
     const tableStatusEle = await this.chromeTab.$('#status_detailled')
     const tableStatus = await tableStatusEle.evaluate(el => el.textContent)
@@ -48,10 +47,24 @@ export class TableObserver extends EventEmitter {
       this.emit('end')
       return
     }
-    const gotoButtonEle = await this.chromeTab.$('#access_game_normal')
-    await gotoButtonEle.click()
-
-
+    let retry = 10
+    while (true) {
+      try {
+        const gotoButtonEle = await this.chromeTab.$('#access_game_normal')
+        await gotoButtonEle.click()
+        break
+      } catch (e) {
+        retry --
+        if (retry < 0) {
+          this.emit('error')
+          return
+        }
+        await new Promise(resolve => {
+          setTimeout(resolve, 5000)
+        })
+      }
+    }
+    
     this.chromeTab.once('load', async () => {
       const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
       if (!mainTitleEle) {
