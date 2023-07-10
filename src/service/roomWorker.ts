@@ -66,6 +66,19 @@ export class RoomWorker {
     }
   }
 
+  async unSubscribeTable(tableId: string, reportTarget: Contact | Room) {
+    const tableObserve = this.tableObserveList.find(ob => ob.tableId === tableId)
+    if (!tableObserve) {
+      reportTarget.say(`没有在观察 ${tableId}`)
+    } else {
+      tableObserve.subscribers = tableObserve.subscribers.filter(item => item !== reportTarget)
+      if (tableObserve.subscribers.length === 0) {
+        tableObserve.observer.close()
+      }
+      reportTarget.say(`已停止观察 ${tableId}`)
+    }
+  }
+
   async subscribeTable(tableId: string, reportTarget: Contact | Room) {
     this.logger.info(`will observe table ${tableId} and report to ${reportTarget}`)
 
