@@ -48,6 +48,11 @@ export class RoomWorker {
   async handleAdminMessage(message: Message) {
     const text = message.text()
 
+    if (/停止 \d+$/.test(text) || /stop \d+$/.test(text)) {
+      const table = /\d+$/.exec(text)[0]
+      return this.unSubscribeTable(table, message.talker())
+    }
+
     if (/^观察 \d+$/.test(text) || /^ob \d+$/.test(text)) {
       const table = /\d+$/.exec(text)[0]
       return this.subscribeTable(table, message.talker())
@@ -59,6 +64,11 @@ export class RoomWorker {
     //   return
     // }
     const text = message.text()
+
+    if (/停止 \d+$/.test(text) || /stop \d+$/.test(text)) {
+      const table = /\d+$/.exec(text)[0]
+      return this.unSubscribeTable(table, message.room())
+    }
 
     if (/观察 \d+$/.test(text) || /ob \d+$/.test(text)) {
       const table = /\d+$/.exec(text)[0]
