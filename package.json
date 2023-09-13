@@ -22,7 +22,7 @@
   "homepage": "https://github.com/hcfw007/BGA-arknova-wechat-notifier#readme",
   "dependencies": {
     "@juzi/wechaty": "^1.0.54",
-    "@juzi/wechaty-puppet-padplus": "^1.3.4",
+    "@juzi/wechaty-puppet-padplus": "^1.2.4",
     "puppeteer": "^20.7.3",
     "qrcode-terminal": "^0.12.0"
   },
