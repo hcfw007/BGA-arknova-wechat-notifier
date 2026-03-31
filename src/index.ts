@@ -1,23 +1,24 @@
 import { Contact, WechatyBuilder, log } from '@juzi/wechaty'
 import { ScanStatus } from '@juzi/wechaty-puppet/types'
 import QrcodeTerminal from 'qrcode-terminal'
-import PuppetPadplus from '@juzi/wechaty-puppet-padplus'
+import PuppetService from '@juzi/wechaty-puppet-service'
 
 import { config } from './config'
 import { RoomWorker } from './service/roomWorker'
 
 const PRE = 'Index'
 
-const puppet = new PuppetPadplus({
-  token: config.token,
-  endpoint: config.endpoint,
+const puppet = new PuppetService({
+  token: 'puppet_workpro_8cac85e9d8c945f69896356e96e436a5',
+  endpoint: '101.126.100.158:4001',
+  timeoutSeconds: 60,
   tls: {
     disable: true
   }
 })
 const bot = WechatyBuilder.build({
   puppet: puppet,
-  name: 'arknova-ob',
+  // name: 'arknova-ob',
 })
 
 let roomWorker: RoomWorker
@@ -31,7 +32,11 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
 }).on('login', async (user: Contact) => {
   log.info(PRE, `user login, info: ${JSON.stringify(user)}`)
 
-  const contact = await bot.Contact.find({id: config.alarmReceiver})
+  let contact
+
+  if (config.alarmReceiver) {
+    contact = await bot.Contact.find({id: config.alarmReceiver})
+  }
 
   log.info(PRE, `data ready, start listening to contact ${contact}`)
   if (!roomWorker) {

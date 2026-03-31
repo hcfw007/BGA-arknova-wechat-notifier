@@ -1,15 +1,21 @@
 import { Contact, Message, Room, Wechaty, types } from "@juzi/wechaty"
+import axios from "axios"
 import { Logger } from "../helper/logger"
 import { TableObserver } from "./tableObserver"
 import { config } from "../config"
+
+const BGA_SESSION_TTL_MS = 2 * 60 * 60 * 1000 // 2 hours
 
 export class RoomWorker {
 
   private readonly logger = new Logger(RoomWorker.name)
 
   tableObserveList: TableObserve[] = []
-  
+  private bgaCookie?: string
+  private bgaCookieObtainedAt?: number
+
   constructor(private readonly bot: Wechaty, private readonly contact?: Contact) {
+    void this.prefetchBgaSession()
     this.bot.on('message', (message: Message) => {
       if (message.type() !== types.Message.Text) {
         this.logger.verbose('non-text message will be ignored')
@@ -21,9 +27,33 @@ export class RoomWorker {
       if (message.talker() === this.contact) {
         void this.handleAdminMessage(message)
         return
-      }  
+      }
       this.logger.verbose('message from others will be ignored')
     })
+  }
+
+  private async prefetchBgaSession() {
+    try {
+      this.logger.info('prefetching BGA session')
+      const res = await axios.get('https://en.boardgamearena.com/', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+        maxRedirects: 5,
+        timeout: 30_000,
+      })
+      const cookies = ((res.headers['set-cookie'] ?? []) as string[]).map(c => c.split(';')[0]).join('; ')
+      if (cookies) {
+        this.bgaCookie = cookies
+        this.bgaCookieObtainedAt = Date.now()
+        this.logger.info('BGA session prefetched')
+      }
+    } catch (e) {
+      this.logger.error(`prefetchBgaSession error: ${e}`)
+    }
+  }
+
+  private isCookieValid(): boolean {
+    return !!this.bgaCookie && !!this.bgaCookieObtainedAt &&
+      Date.now() - this.bgaCookieObtainedAt < BGA_SESSION_TTL_MS
   }
 
   sendAlarm(alarmText: string): Promise<void | Message> {
@@ -40,7 +70,7 @@ export class RoomWorker {
       return this.unSubscribeTable(table, message.talker())
     }
 
-    if (/^观察 \d+$/.test(text) || /^ob \d+$/.test(text)) {
+    if (/^Ob \d+$/.test(text) || /^ob \d+$/.test(text)) {
       const table = /\d+$/.exec(text)[0]
       return this.subscribeTable(table, message.talker())
     }
@@ -57,7 +87,7 @@ export class RoomWorker {
       return this.unSubscribeTable(table, message.room())
     }
 
-    if (/观察 \d+$/.test(text) || /ob \d+$/.test(text)) {
+    if (/Ob \d+$/.test(text) || /ob \d+$/.test(text)) {
       const table = /\d+$/.exec(text)[0]
       return this.subscribeTable(table, message.room())
     }
@@ -66,23 +96,25 @@ export class RoomWorker {
   async unSubscribeTable(tableId: string, reportTarget: Contact | Room) {
     const tableObserve = this.tableObserveList.find(ob => ob.tableId === tableId)
     if (!tableObserve) {
-      reportTarget.say(`没有在观察 ${tableId}`)
+      reportTarget.say(`没有在Ob ${tableId}`)
     } else {
       tableObserve.subscribers = tableObserve.subscribers.filter(item => item !== reportTarget)
       if (tableObserve.subscribers.length === 0) {
         tableObserve.observer.close()
       }
-      reportTarget.say(`已停止观察 ${tableId}`)
+      reportTarget.say(`已停止Ob ${tableId}`)
     }
   }
 
   async subscribeTable(tableId: string, reportTarget: Contact | Room) {
+    await reportTarget.sync()
+    await reportTarget.say(`收到Ob ${tableId}，请稍等...`)
     this.logger.info(`will observe table ${tableId} and report to ${reportTarget}`)
 
     const tableObserve = this.tableObserveList.find(ob => ob.tableId === tableId)
     if (tableObserve) {
       if (tableObserve.subscribers.includes(reportTarget)) {
-        reportTarget.say(`已经在观察 ${tableId}了 `)
+        reportTarget.say(`已经在Ob ${tableId}了 `)
       } else {
         tableObserve.subscribers.push(reportTarget)
       }
@@ -91,7 +123,7 @@ export class RoomWorker {
         // 已经 ready 的桌子，补发
         this.reportCurrentState(tableObserve)
       }
-      
+
       return
     }
 
@@ -100,7 +132,11 @@ export class RoomWorker {
       playerMap[bgaName] = await this.bot.Contact.find({id: config.playerMap[bgaName]})
     }
 
-    const ob = new TableObserver(tableId, playerMap)
+    const sharedCookie = this.isCookieValid() ? this.bgaCookie : undefined
+    const ob = new TableObserver(tableId, playerMap, sharedCookie, (cookie) => {
+      this.bgaCookie = cookie
+      this.bgaCookieObtainedAt = Date.now()
+    })
     const newTableObserve = {
       tableId,
       subscribers: [reportTarget],
@@ -108,7 +144,6 @@ export class RoomWorker {
     }
 
     this.tableObserveList.push(newTableObserve)
-    // TODO: create a ob and setup listeners
 
     this.bindEvents(newTableObserve)
 
@@ -119,7 +154,7 @@ export class RoomWorker {
     tableObserve.observer.on('ready', () => {
       this.logger.info(`table ${tableObserve.tableId} ready`)
       tableObserve.subscribers.forEach(target => {
-        target.say(`成功OB游戏桌${tableObserve.tableId}，当前状态为${tableObserve.observer.currentState}`).catch((e: Error) => {
+        target.say(`成功OB游戏桌${tableObserve.tableId}`).catch((e: Error) => {
           this.logger.error(`messageSendError, ${e.stack}`)
         })
       })
@@ -136,6 +171,7 @@ export class RoomWorker {
       this.reportCurrentState(tableObserve)
     }).on('error', () => {
       tableObserve.observer.close()
+      this.bgaCookie = undefined // invalidate session on error
       tableObserve.subscribers.forEach(target => {
         target.say(`游戏桌${tableObserve.tableId}发生错误，停止OB`).catch((e: Error) => {
           this.logger.error(`messageSendError, ${e.stack}`)
@@ -146,7 +182,7 @@ export class RoomWorker {
   }
 
   reportCurrentState(tableObserve: TableObserve) {
-    let str = '现在轮到'
+    let str = `[桌号${tableObserve.tableId}] 现在轮到`
     const players = tableObserve.observer.currentPlayers
     const contacts = []
     for (const player of players || []) {
@@ -158,8 +194,7 @@ export class RoomWorker {
       }
     }
 
-    const currentState = tableObserve.observer.currentState 
-    str += `，当前状态为 ${currentState}。`
+    str += `。`
     tableObserve.subscribers.forEach(target => {
       this.logger.info(`saying ${str} to ${target}, mentioning ${contacts}`)
       target.say(str, {

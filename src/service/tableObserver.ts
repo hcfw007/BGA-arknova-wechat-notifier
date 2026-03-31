@@ -16,7 +16,6 @@ export class TableObserver extends EventEmitter {
   private readonly logger = new Logger(TableObserver.name)
 
   ready = false
-  currentState?: string
   currentPlayers?: string[]
 
   private playerIdToName: Record<string, string> = {}
@@ -24,7 +23,12 @@ export class TableObserver extends EventEmitter {
   private pollTimer?: NodeJS.Timeout
   private http: AxiosInstance
 
-  constructor(readonly tableId: string, private readonly playerMap: PlayerMap = {}) {
+  constructor(
+    readonly tableId: string,
+    private readonly playerMap: PlayerMap = {},
+    private sharedCookie?: string,
+    private readonly onCookieUpdate?: (cookie: string) => void,
+  ) {
     super()
     this.http = axios.create({
       headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
@@ -35,7 +39,9 @@ export class TableObserver extends EventEmitter {
 
   async init() {
     try {
+      this.logger.info('init: getting session and token')
       const { cookie, token } = await this.getSessionAndToken()
+      this.logger.info('init: got session, fetching table info')
 
       const tableInfo = await this.fetchTableInfo(cookie, token)
       if (!tableInfo) {
@@ -53,7 +59,7 @@ export class TableObserver extends EventEmitter {
       }
 
       this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
-      this.logger.info(`game URL: ${this.gameUrl}`)
+      this.logger.info(`init: got table info, fetching game state from ${this.gameUrl}`)
 
       const state = await this.fetchGameState(cookie)
       if (!state) {
@@ -62,6 +68,7 @@ export class TableObserver extends EventEmitter {
         return
       }
 
+      this.logger.info('init: got game state, ready')
       this.applyState(state)
       this.ready = true
       this.emit('ready')
@@ -90,8 +97,6 @@ export class TableObserver extends EventEmitter {
     this.currentPlayers = activeIds
       .filter(id => id && id !== '0' && id !== '-1')
       .map(id => this.playerIdToName[id] ?? id)
-
-    this.currentState = `进度 ${state.updateGameProgression ?? '?'}%`
   }
 
   private startPolling(cookie: string) {
@@ -116,6 +121,7 @@ export class TableObserver extends EventEmitter {
 
     const prevPlayers = this.currentPlayers
     this.applyState(state)
+    this.logger.info(`poll [table ${this.tableId}]: players=${this.currentPlayers?.join(', ')}`)
 
     if (state.updateGameProgression === 100) {
       this.emit('end')
@@ -136,17 +142,14 @@ export class TableObserver extends EventEmitter {
     const extractCookies = (headers: any): string =>
       ((headers['set-cookie'] ?? []) as string[]).map(c => c.split(';')[0]).join('; ')
 
-    // Get PHPSESSID from homepage
-    const homeRes = await this.http.get('https://en.boardgamearena.com/')
-    let cookie = extractCookies(homeRes.headers)
-
-    // Load table page to pick up additional cookies and extract requestToken
     const tableRes = await this.http.get(
       `https://en.boardgamearena.com/table?table=${this.tableId}`,
-      { headers: { Cookie: cookie } }
+      this.sharedCookie ? { headers: { Cookie: this.sharedCookie } } : undefined
     )
-    const tableCookies = extractCookies(tableRes.headers)
-    if (tableCookies) cookie = [cookie, tableCookies].filter(Boolean).join('; ')
+
+    const newCookies = extractCookies(tableRes.headers)
+    const cookie = [this.sharedCookie, newCookies].filter(Boolean).join('; ')
+    this.onCookieUpdate?.(cookie)
 
     const tokenMatch = (tableRes.data as string).match(/requestToken['":,\s]+([a-f0-9]{64})/)
     if (!tokenMatch) throw new Error('could not extract requestToken from table page')

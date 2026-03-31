@@ -1,6 +1,5 @@
 const requiredConfig = {
-  token: process.env.PADPLUS_TOKEN,
-  endpoint: process.env.PADPLUS_ENDPOINT,
+  token: process.env.WORK_TOKEN,
 } as const
 
 const optionalConfig = {
