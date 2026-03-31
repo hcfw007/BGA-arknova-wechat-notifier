@@ -9,8 +9,7 @@ import { RoomWorker } from './service/roomWorker'
 const PRE = 'Index'
 
 const puppet = new PuppetService({
-  token: 'puppet_workpro_8cac85e9d8c945f69896356e96e436a5',
-  endpoint: '101.126.100.158:4001',
+  token: config.token,
   timeoutSeconds: 60,
   tls: {
     disable: true
@@ -18,7 +17,7 @@ const puppet = new PuppetService({
 })
 const bot = WechatyBuilder.build({
   puppet: puppet,
-  // name: 'arknova-ob',
+  name: 'arknova-ob',
 })
 
 let roomWorker: RoomWorker
@@ -36,7 +35,7 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
 
   if (config.alarmReceiver) {
     contact = await bot.Contact.find({id: config.alarmReceiver})
-  }
+  }q
 
   log.info(PRE, `data ready, start listening to contact ${contact}`)
   if (!roomWorker) {
