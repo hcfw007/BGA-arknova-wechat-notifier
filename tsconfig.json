@@ -25,7 +25,6 @@
   "exclude": [
     "node_modules/",
     "dist/",
-    "src/index.ts",
   ],
   "include": [
     "app/**/*.ts",

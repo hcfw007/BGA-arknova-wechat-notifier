@@ -7,3 +7,4 @@ dist/
 *.memory-card.json
 run-test.sh
 .claude
+docker-compose.yml
