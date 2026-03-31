@@ -35,7 +35,7 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
 
   if (config.alarmReceiver) {
     contact = await bot.Contact.find({id: config.alarmReceiver})
-  }q
+  }
 
   log.info(PRE, `data ready, start listening to contact ${contact}`)
   if (!roomWorker) {
