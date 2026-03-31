@@ -5,7 +5,6 @@ const requiredConfig = {
 
 const optionalConfig = {
   alarmReceiver: process.env.ALARM_CONTACT_ID,
-  puppetHeadless: !(process.env.PUPPET_HEADLESS === 'false')
 } as const
 
 for (const key in requiredConfig) {

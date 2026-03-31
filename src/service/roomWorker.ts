@@ -1,5 +1,4 @@
 import { Contact, Message, Room, Wechaty, types } from "@juzi/wechaty"
-import puppeteer, { Browser } from "puppeteer"
 import { Logger } from "../helper/logger"
 import { TableObserver } from "./tableObserver"
 import { config } from "../config"
@@ -7,18 +6,6 @@ import { config } from "../config"
 export class RoomWorker {
 
   private readonly logger = new Logger(RoomWorker.name)
-
-  _browser?: Browser
-
-  async getBrowserInstance() {
-    if (!this._browser) {
-      this._browser = await puppeteer.launch({
-        headless: config.puppetHeadless ? undefined : false,
-        args: ['--no-sandbox']
-      })
-    }
-    return this._browser
-  }
 
   tableObserveList: TableObserve[] = []
   
@@ -100,7 +87,7 @@ export class RoomWorker {
         tableObserve.subscribers.push(reportTarget)
       }
 
-      if (tableObserve.observer.pageReady) {
+      if (tableObserve.observer.ready) {
         // 已经 ready 的桌子，补发
         this.reportCurrentState(tableObserve)
       }
@@ -108,15 +95,12 @@ export class RoomWorker {
       return
     }
 
-    const browser = await this.getBrowserInstance()
-    const page = await browser.newPage()
-
     const playerMap = {}
     for (const bgaName in config.playerMap) {
       playerMap[bgaName] = await this.bot.Contact.find({id: config.playerMap[bgaName]})
     }
 
-    const ob = new TableObserver(tableId, page, playerMap)
+    const ob = new TableObserver(tableId, playerMap)
     const newTableObserve = {
       tableId,
       subscribers: [reportTarget],

@@ -1,208 +1,208 @@
 import { Contact } from "@juzi/wechaty"
-import EventEmitter from "events"
-import { Page } from "puppeteer"
+import axios, { AxiosInstance } from "axios"
+import { EventEmitter } from "events"
 import { Logger } from "../helper/logger"
-import { stateRegulator } from "../helper/util"
+
+const POLL_INTERVAL_MS = 60 * 1000
+
+interface BgaGameState {
+  active_player: string
+  multisactive?: string[]
+  updateGameProgression?: number
+}
 
 export class TableObserver extends EventEmitter {
 
   private readonly logger = new Logger(TableObserver.name)
 
-  pageReady = false
+  ready = false
   currentState?: string
   currentPlayers?: string[]
-  reloadCheckTimer?: NodeJS.Timer
-  
-  playerIdMap: {
-    [name: string]: {
-      busy?: boolean
-      id: string,
-    }
-  } = {}
 
-  constructor (private readonly tableId: string, private readonly chromeTab: Page, private readonly playerMap: PlayerMap = {}) {
+  private playerIdToName: Record<string, string> = {}
+  private gameUrl?: string
+  private pollTimer?: NodeJS.Timeout
+  private http: AxiosInstance
+
+  constructor(readonly tableId: string, private readonly playerMap: PlayerMap = {}) {
     super()
+    this.http = axios.create({
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+      maxRedirects: 5,
+      timeout: 30_000,
+    })
   }
 
   async init() {
+    try {
+      const { cookie, token } = await this.getSessionAndToken()
 
-    const client = await this.chromeTab.target().createCDPSession()
-    await client.send('Network.enable')
-    
-    client.on('Network.webSocketFrameReceived', (params) => {
-      const data = params.response?.payloadData
-      if (data && data.length > 10) {
-        void this.handleBGAWsMessage(data)
+      const tableInfo = await this.fetchTableInfo(cookie, token)
+      if (!tableInfo) {
+        this.emit('error')
+        return
       }
-    })
 
-    const future = new Promise(resolve => {
-      this.chromeTab.once('load', resolve)
-    })
-    await this.chromeTab.goto(`https://en.boardgamearena.com/table?table=${this.tableId}`)
-
-    const tableStatusEle = await this.chromeTab.$('#status_detailled')
-    const tableStatus = await tableStatusEle.evaluate(el => el.textContent)
-    if (tableStatus === 'Game has ended') {
-      this.emit('end')
-      return
-    }
-    let retry = 10
-    while (true) {
-      try {
-        const gotoButtonEle = await this.chromeTab.$('#access_game_normal')
-        await gotoButtonEle.click()
-        break
-      } catch (e) {
-        retry --
-        if (retry < 0) {
-          this.emit('error')
-          return
-        }
-        await new Promise(resolve => {
-          setTimeout(resolve, 5000)
-        })
-      }
-    }
-    
-    this.chromeTab.once('load', async () => {
-      const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
-      if (!mainTitleEle) {
+      if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
         this.emit('end')
         return
       }
 
-      this.pageReady = true
+      for (const [id, player] of Object.entries(tableInfo.players as Record<string, { fullname: string }>)) {
+        this.playerIdToName[id] = player.fullname
+      }
 
-      await this.initPlayerIdMap()
-      await this.getCurrentState()
-      
+      this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+      this.logger.info(`game URL: ${this.gameUrl}`)
+
+      const state = await this.fetchGameState(cookie)
+      if (!state) {
+        this.logger.info('could not get initial game state')
+        this.emit('error')
+        return
+      }
+
+      this.applyState(state)
+      this.ready = true
       this.emit('ready')
-      this.startCheckReload()
-    })
+      this.startPolling(cookie)
+    } catch (e) {
+      this.logger.error(`init error: ${e}`)
+      this.emit('error')
+    }
   }
 
   close() {
-    this.chromeTab.close()
-    this.stopCheckReload()
-    this.pageReady = false
+    this.stopPolling()
+    this.ready = false
   }
 
-  async handleBGAWsMessage(data: string) {
-    let dataObj:any
-    try {
-      const offSet = data.indexOf('[')
-      const _dataStr = data.slice(offSet)
-      dataObj = JSON.parse(_dataStr)
-    } catch (e) {
-      this.logger.error(`failed to pase message: ${data}`)
-      return
-    }
-    await this.getCurrentState()
+  getContactFromPlayer(player: string) {
+    if (player === 'all') return 'all'
+    return this.playerMap[player]
   }
 
-  async getCurrentState() {
-    if (!this.pageReady) {
-      this.logger.info('trying to get state when page not ready, ignored')
+  private applyState(state: BgaGameState) {
+    const activeIds = (state.multisactive?.length ?? 0) > 0
+      ? state.multisactive!
+      : [state.active_player]
+
+    this.currentPlayers = activeIds
+      .filter(id => id && id !== '0' && id !== '-1')
+      .map(id => this.playerIdToName[id] ?? id)
+
+    this.currentState = `进度 ${state.updateGameProgression ?? '?'}%`
+  }
+
+  private startPolling(cookie: string) {
+    if (!this.pollTimer) {
+      this.pollTimer = setInterval(() => void this.poll(cookie), POLL_INTERVAL_MS)
+    }
+  }
+
+  private stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = undefined
+    }
+  }
+
+  private async poll(cookie: string) {
+    const state = await this.fetchGameState(cookie)
+    if (!state) {
+      this.logger.info('poll: no state returned')
       return
     }
-    const mainTitleEle = await this.chromeTab.$('#pagemaintitletext')
-    if (!mainTitleEle) {
-      this.logger.info('failed to find main title element')
+
+    const prevPlayers = this.currentPlayers
+    this.applyState(state)
+
+    if (state.updateGameProgression === 100) {
       this.emit('end')
-    }
-
-    const state = stateRegulator(await mainTitleEle.evaluate(el => el.textContent))
-
-    const busyPlayers = []
-    for (const key in this.playerIdMap) {
-      const activeDivEle = await this.chromeTab.$(`#avatar_active_wrap_${this.playerIdMap[key].id}`)
-      const visibility = await activeDivEle.evaluate(el => el.checkVisibility())
-      if (visibility) {
-        busyPlayers.push(key)
-      }
-      this.playerIdMap[key].busy = visibility
-    }
-
-    if (busyPlayers.length === 0) {
-      this.logger.info(`state: ${state}, no busy players, will not update unless it's ended`)
-      if (state.includes('End of game') && !state.includes('triggered')) {
-        this.emit('end')
-      }
       return
     }
-    const previousPlayers = this.currentPlayers
 
-
-    this.currentPlayers = busyPlayers
-    this.currentState = state
-
-    this.logger.info(`state update: ${this.currentState}, players: ${JSON.stringify(this.currentPlayers)}`)
-
-    if (previousPlayers) {
-      const previousPlayersSet = new Set(previousPlayers)
-      const newPlayers = this.currentPlayers.filter(player => !previousPlayersSet.has(player))
+    if (prevPlayers) {
+      const prevSet = new Set(prevPlayers)
+      const newPlayers = (this.currentPlayers ?? []).filter(p => !prevSet.has(p))
       if (newPlayers.length > 0) {
-        this.logger.info(`new player event: ${newPlayers}`)
-
+        this.logger.info(`new active players: ${newPlayers}`)
         this.emit('newPlayerMove', newPlayers)
       }
     }
-
-    if (this.currentState.includes('End of game') && !this.currentState.includes('triggered')) {
-      this.emit('end')
-    }
   }
 
-  startCheckReload() {
-    if (!this.reloadCheckTimer) {
-      this.reloadCheckTimer = setInterval(this.checkReload.bind(this), 30 * 1000)
-    }
+  private async getSessionAndToken(): Promise<{ cookie: string; token: string }> {
+    const extractCookies = (headers: any): string =>
+      ((headers['set-cookie'] ?? []) as string[]).map(c => c.split(';')[0]).join('; ')
+
+    // Get PHPSESSID from homepage
+    const homeRes = await this.http.get('https://en.boardgamearena.com/')
+    let cookie = extractCookies(homeRes.headers)
+
+    // Load table page to pick up additional cookies and extract requestToken
+    const tableRes = await this.http.get(
+      `https://en.boardgamearena.com/table?table=${this.tableId}`,
+      { headers: { Cookie: cookie } }
+    )
+    const tableCookies = extractCookies(tableRes.headers)
+    if (tableCookies) cookie = [cookie, tableCookies].filter(Boolean).join('; ')
+
+    const tokenMatch = (tableRes.data as string).match(/requestToken['":,\s]+([a-f0-9]{64})/)
+    if (!tokenMatch) throw new Error('could not extract requestToken from table page')
+
+    return { cookie, token: tokenMatch[1] }
   }
 
-  stopCheckReload() {
-    if (this.reloadCheckTimer) {
-      clearInterval(this.reloadCheckTimer)
-      this.reloadCheckTimer = undefined
-    }
-  }
-
-  async checkReload() {
-    const reloadPopup = await this.chromeTab.$('.bga-popup-modal__content')
-    if (reloadPopup) {
-      this.logger.info('check reload: page dead')
-      await this.chromeTab.reload()
-    } else {
-      this.logger.info('check reload: page alive')
-    }
-    await this.getCurrentState()
-  }
-  
-  getContactFromPlayer(player: string) {
-    if (player === 'all') {
-      return 'all'
-    }
-    if (this.playerMap) {
-      return this.playerMap[player]
-    }
-  }
-
-  async initPlayerIdMap() {
-    const playerBoardEles = await this.chromeTab.$$('.player_board_inner')
-    const promises = playerBoardEles.map(async ele => {
-      const playerNameDivEle = await ele.$('.player-name')
-      const playerNameAEle = await ele.$('.player-name>a')
-      if (!playerNameAEle) {
-        return // spectator? 
+  private async fetchTableInfo(cookie: string, token: string) {
+    const tablePageUrl = `https://en.boardgamearena.com/table?table=${this.tableId}`
+    const res = await this.http.get(
+      `https://en.boardgamearena.com/table/table/tableinfos.html?id=${this.tableId}`,
+      {
+        headers: {
+          Cookie: cookie,
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-Request-Token': token,
+          Referer: tablePageUrl,
+          Accept: 'application/json, text/javascript, */*; q=0.01',
+        }
       }
-      const playerId = (await playerNameDivEle.evaluate(el => el.id)).slice('player_name_'.length)
-      const playerName = await playerNameAEle.evaluate(el => el.textContent)
-      this.playerIdMap[playerName] = {
-        id: playerId,
-        busy: false
+    )
+    return (res.data as any)?.data ?? null
+  }
+
+  private async fetchGameState(cookie: string): Promise<BgaGameState | null> {
+    if (!this.gameUrl) return null
+    try {
+      const res = await this.http.get(this.gameUrl, { headers: { Cookie: cookie } })
+      return this.parseGameState(res.data as string)
+    } catch (e) {
+      this.logger.error(`fetchGameState error: ${e}`)
+      return null
+    }
+  }
+
+  private parseGameState(html: string): BgaGameState | null {
+    const marker = '"gamestate":{'
+    const idx = html.indexOf(marker)
+    if (idx === -1) return null
+
+    let depth = 0
+    const start = idx + marker.length - 1
+    let end = start
+    for (let i = start; i < html.length; i++) {
+      if (html[i] === '{') depth++
+      else if (html[i] === '}') {
+        depth--
+        if (depth === 0) { end = i + 1; break }
       }
-    })
-    await Promise.all(promises)
+    }
+
+    try {
+      return JSON.parse(html.slice(start, end))
+    } catch {
+      return null
+    }
   }
 }
 
@@ -211,6 +211,6 @@ export interface PlayerMap {
 }
 
 export interface ContactPlayer {
-  contact: Contact,
-  gameName: string,
+  contact: Contact
+  gameName: string
 }
