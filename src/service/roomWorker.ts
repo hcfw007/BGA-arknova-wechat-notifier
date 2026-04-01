@@ -159,10 +159,16 @@ export class RoomWorker {
         })
       })
       this.reportCurrentState(tableObserve)
-    }).on('end', () => {
+    }).on('end', (result: { name: string; score: string; rank: number }[]) => {
       tableObserve.observer.close()
+      const lines: string[] = [`游戏桌${tableObserve.tableId}已结束`]
+      if (result.length > 0) {
+        lines.push('最终排名：')
+        result.forEach(p => lines.push(`  ${p.rank}. ${p.name}  ${p.score}分`))
+      }
+      lines.push('停止OB')
       tableObserve.subscribers.forEach(target => {
-        target.say(`游戏桌${tableObserve.tableId}已结束，停止OB`).catch((e: Error) => {
+        target.say(lines.join('\n')).catch((e: Error) => {
           this.logger.error(`messageSendError, ${e.stack}`)
         })
       })

@@ -5,10 +5,18 @@ import { Logger } from "../helper/logger"
 
 const POLL_INTERVAL_MS = 60 * 1000
 
+interface BgaPlayerResult {
+  name: string
+  score: string
+  score_aux: string
+  rank: number
+}
+
 interface BgaGameState {
   active_player: string
   multiactive?: string[]
   updateGameProgression?: number
+  args?: { result?: BgaPlayerResult[] }
 }
 
 export class TableObserver extends EventEmitter {
@@ -72,7 +80,7 @@ export class TableObserver extends EventEmitter {
       this.applyState(state)
       this.ready = true
       this.emit('ready')
-      this.startPolling(cookie)
+      this.startPolling(cookie, token)
     } catch (e) {
       this.logger.error(`init error: ${e}`)
       this.emit('error')
@@ -99,9 +107,9 @@ export class TableObserver extends EventEmitter {
       .map(id => this.playerIdToName[id] ?? id)
   }
 
-  private startPolling(cookie: string) {
+  private startPolling(cookie: string, token: string) {
     if (!this.pollTimer) {
-      this.pollTimer = setInterval(() => void this.poll(cookie), POLL_INTERVAL_MS)
+      this.pollTimer = setInterval(() => void this.poll(cookie, token), POLL_INTERVAL_MS)
     }
   }
 
@@ -112,7 +120,7 @@ export class TableObserver extends EventEmitter {
     }
   }
 
-  private async poll(cookie: string) {
+  private async poll(cookie: string, token: string) {
     const state = await this.fetchGameState(cookie)
     if (!state) {
       this.logger.info('poll: no state returned')
@@ -124,8 +132,13 @@ export class TableObserver extends EventEmitter {
     this.logger.info(`poll [table ${this.tableId}]: players=${this.currentPlayers?.join(', ')}`)
 
     if (state.updateGameProgression === 100) {
-      this.emit('end')
-      return
+      const tableInfo = await this.fetchTableInfo(cookie, token)
+      const status = tableInfo?.status
+      this.logger.info(`poll [table ${this.tableId}]: progression=100, tableinfos status=${status}`)
+      if (status === 'finished' || status === 'archive') {
+        this.emit('end', state.args?.result ?? [])
+        return
+      }
     }
 
     if (prevPlayers) {
