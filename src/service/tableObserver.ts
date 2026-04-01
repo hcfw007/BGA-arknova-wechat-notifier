@@ -7,7 +7,7 @@ const POLL_INTERVAL_MS = 60 * 1000
 
 interface BgaGameState {
   active_player: string
-  multisactive?: string[]
+  multiactive?: string[]
   updateGameProgression?: number
 }
 
@@ -90,8 +90,8 @@ export class TableObserver extends EventEmitter {
   }
 
   private applyState(state: BgaGameState) {
-    const activeIds = (state.multisactive?.length ?? 0) > 0
-      ? state.multisactive!
+    const activeIds = (state.multiactive?.length ?? 0) > 0
+      ? state.multiactive!
       : [state.active_player]
 
     this.currentPlayers = activeIds
