@@ -188,19 +188,35 @@ export class RoomWorker {
   }
 
   reportCurrentState(tableObserve: TableObserve) {
-    let str = `[桌号${tableObserve.tableId}] 现在轮到`
     const players = tableObserve.observer.currentPlayers
+    const waiting = tableObserve.observer.waitingForJoin
     const contacts = []
-    for (const player of players || []) {
-      str += `${player}`
-      const contact = tableObserve.observer.getContactFromPlayer(player)
-      if (contact) {
-        str += `(${contact === 'all' ? '所有人' : contact.name()})`
-        contacts.push(contact === 'all' ? '@all' : contact)
-      }
-    }
+    let str = `[桌号${tableObserve.tableId}] `
 
-    str += `。`
+    if (waiting) {
+      const names = []
+      for (const player of players || []) {
+        let name = player
+        const contact = tableObserve.observer.getContactFromPlayer(player)
+        if (contact) {
+          name += `(${contact === 'all' ? '所有人' : contact.name()})`
+          contacts.push(contact === 'all' ? '@all' : contact)
+        }
+        names.push(name)
+      }
+      str += `${names.join('、')}尚未加入。`
+    } else {
+      str += '现在轮到'
+      for (const player of players || []) {
+        str += `${player}`
+        const contact = tableObserve.observer.getContactFromPlayer(player)
+        if (contact) {
+          str += `(${contact === 'all' ? '所有人' : contact.name()})`
+          contacts.push(contact === 'all' ? '@all' : contact)
+        }
+      }
+      str += `。`
+    }
     tableObserve.subscribers.forEach(target => {
       this.logger.info(`saying ${str} to ${target}, mentioning ${contacts}`)
       target.say(str, {

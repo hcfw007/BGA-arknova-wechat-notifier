@@ -25,6 +25,7 @@ export class TableObserver extends EventEmitter {
 
   ready = false
   currentPlayers?: string[]
+  waitingForJoin = false
 
   private playerIdToName: Record<string, string> = {}
   private gameUrl?: string
@@ -64,6 +65,17 @@ export class TableObserver extends EventEmitter {
 
       for (const [id, player] of Object.entries(tableInfo.players as Record<string, { fullname: string }>)) {
         this.playerIdToName[id] = player.fullname
+      }
+
+      const expectedPlayers = this.getExpectedPlayers(tableInfo)
+      if (expectedPlayers.length > 0) {
+        this.logger.info(`init: found expected players: ${expectedPlayers.join(', ')}`)
+        this.currentPlayers = expectedPlayers
+        this.waitingForJoin = true
+        this.ready = true
+        this.emit('ready')
+        this.startPolling(cookie, token)
+        return
       }
 
       this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
@@ -121,6 +133,37 @@ export class TableObserver extends EventEmitter {
   }
 
   private async poll(cookie: string, token: string) {
+    const tableInfo = await this.fetchTableInfo(cookie, token)
+    if (tableInfo) {
+      const status = tableInfo.status
+      if (status === 'finished' || status === 'archive') {
+        this.emit('end', [])
+        return
+      }
+
+      const expectedPlayers = this.getExpectedPlayers(tableInfo)
+      if (expectedPlayers.length > 0) {
+        const prevPlayers = this.currentPlayers
+        this.currentPlayers = expectedPlayers
+        this.waitingForJoin = true
+        this.logger.info(`poll [table ${this.tableId}]: expected players=${expectedPlayers.join(', ')}`)
+        if (prevPlayers) {
+          const prevSet = new Set(prevPlayers)
+          const newPlayers = expectedPlayers.filter(p => !prevSet.has(p))
+          if (newPlayers.length > 0) {
+            this.emit('newPlayerMove', newPlayers)
+          }
+        }
+        return
+      }
+
+      this.waitingForJoin = false
+      if (!this.gameUrl && tableInfo.gameserver && tableInfo.game_name) {
+        this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+        this.logger.info(`poll: game started, url=${this.gameUrl}`)
+      }
+    }
+
     const state = await this.fetchGameState(cookie)
     if (!state) {
       this.logger.info('poll: no state returned')
@@ -132,7 +175,6 @@ export class TableObserver extends EventEmitter {
     this.logger.info(`poll [table ${this.tableId}]: players=${this.currentPlayers?.join(', ')}`)
 
     if (state.updateGameProgression === 100) {
-      const tableInfo = await this.fetchTableInfo(cookie, token)
       const status = tableInfo?.status
       this.logger.info(`poll [table ${this.tableId}]: progression=100, tableinfos status=${status}`)
       if (status === 'finished' || status === 'archive') {
@@ -149,6 +191,13 @@ export class TableObserver extends EventEmitter {
         this.emit('newPlayerMove', newPlayers)
       }
     }
+  }
+
+  private getExpectedPlayers(tableInfo: any): string[] {
+    if (!tableInfo?.players) return []
+    return Object.values(tableInfo.players as Record<string, { fullname: string; table_status: string }>)
+      .filter(p => p.table_status === 'expected')
+      .map(p => p.fullname)
   }
 
   private async getSessionAndToken(): Promise<{ cookie: string; token: string }> {
