@@ -59,7 +59,13 @@ export class TableObserver extends EventEmitter {
       }
 
       if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
-        this.emit('end')
+        if (tableInfo.gameserver && tableInfo.game_name) {
+          this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+          const state = await this.fetchGameState(cookie)
+          this.emit('end', state?.args?.result ?? [])
+        } else {
+          this.emit('end', [])
+        }
         return
       }
 
@@ -137,7 +143,8 @@ export class TableObserver extends EventEmitter {
     if (tableInfo) {
       const status = tableInfo.status
       if (status === 'finished' || status === 'archive') {
-        this.emit('end', [])
+        const state = await this.fetchGameState(cookie)
+        this.emit('end', state?.args?.result ?? [])
         return
       }
 
@@ -173,15 +180,6 @@ export class TableObserver extends EventEmitter {
     const prevPlayers = this.currentPlayers
     this.applyState(state)
     this.logger.info(`poll [table ${this.tableId}]: players=${this.currentPlayers?.join(', ')}`)
-
-    if (state.updateGameProgression === 100) {
-      const status = tableInfo?.status
-      this.logger.info(`poll [table ${this.tableId}]: progression=100, tableinfos status=${status}`)
-      if (status === 'finished' || status === 'archive') {
-        this.emit('end', state.args?.result ?? [])
-        return
-      }
-    }
 
     if (prevPlayers) {
       const prevSet = new Set(prevPlayers)
