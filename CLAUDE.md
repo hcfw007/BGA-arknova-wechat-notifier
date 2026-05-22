@@ -7,37 +7,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run dist    # Compile TypeScript → dist/
 npm start       # Run compiled app (node ./dist/index.js)
-npm run dev     # Run via run-test.sh (dev/test script)
 ```
 
-There are no automated tests. The `src/test.ts` file is a manual test script for `TableObserver`.
+`npm run dev` is declared in `package.json` but references `run-test.sh`, which is not in the repo — the script will fail unless someone reintroduces that file.
+
+There are no automated tests.
 
 ## Environment Setup
 
-The app requires a `.env` file (loaded via VSCode launch config or manually exported). Required variables:
-- `PADPLUS_TOKEN` — Wechaty PadPlus token
-- `PADPLUS_ENDPOINT` — PadPlus endpoint URL
+Required:
 
-Optional variables:
-- `ALARM_CONTACT_ID` — WeChat contact ID to notify on errors
-- `PUPPET_HEADLESS` — Set to `false` to show the browser window
-- `PLAYER_[n]_BGA_NAME` / `PLAYER_[n]_WECHAT_ID` — BGA-to-WeChat player mappings (e.g., `PLAYER_1_BGA_NAME=Alice`, `PLAYER_1_WECHAT_ID=wxid_...`)
+- `WORK_TOKEN` — token for `@juzi/wechaty-puppet-service` (the puppet is constructed with `tls.disable = true` and a 60s timeout).
+
+Optional:
+
+- `ALARM_CONTACT_ID` — WeChat contact ID that doubles as (a) the admin who can issue commands in a private chat and (b) the recipient of error alarms via `RoomWorker.sendAlarm`.
+- `PLAYER_<n>_BGA_NAME` / `PLAYER_<n>_WECHAT_ID` — pair-wise BGA-to-WeChat mapping. `<n>` is any positive integer; `config.ts` scans every env var matching `^PLAYER_\d+_BGA_NAME` and looks up the matching `PLAYER_<n>_WECHAT_ID`.
+
+There is no `.env` loader in the code — vars must already be exported in the process environment (VSCode launch config, shell, Docker `-e`, etc.).
 
 ## Architecture
 
-This is a WeChat bot that monitors Board Game Arena (BGA) Arknova tables and @-mentions players in WeChat when it's their turn.
+WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions the active player in a WeChat room when the turn changes.
 
 **Flow:**
 
-1. `src/index.ts` — Bootstraps the Wechaty bot (PadPlus puppet), handles QR login, creates a single `RoomWorker`.
-2. `src/service/roomWorker.ts` — Receives WeChat messages. Parses commands (`观察`/`ob` to start, `停止`/`stop` to stop), manages a Puppeteer browser, and spawns/destroys `TableObserver` instances per table. On turn change, formats a message with @mentions and sends it to WeChat.
-3. `src/service/tableObserver.ts` — One instance per BGA table. Uses Puppeteer to load the table page, intercepts WebSocket frames to detect game state changes, queries the DOM for active player info. Emits: `ready`, `newPlayerMove`, `end`, `error`. Runs a 30-second health-check timer to detect and dismiss page reload popups.
-4. `src/config.ts` — Loads and validates all env vars; exports `config` object and `playerMapping` array.
-5. `src/helper/logger.ts` — Thin wrapper over Wechaty's logger that prefixes log lines with the module name.
-6. `src/helper/util.ts` — `stateRegulator()`: normalizes BGA game state strings (strips extra whitespace/newlines).
+1. `src/index.ts` — Builds a Wechaty bot with `@juzi/wechaty-puppet-service`, prints the login QR via `qrcode-terminal`, and on `login` instantiates a single `RoomWorker`.
+2. `src/service/roomWorker.ts` — Owns all WeChat message handling.
+   - Recognized commands (regex-matched on message text):
+     - `Ob <tableId>` / `ob <tableId>` → start observing
+     - `停止 <tableId>` / `stop <tableId>` → stop observing
+   - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact; room commands are honored from anyone in the room (mention-self check is currently commented out).
+   - Multiple subscribers (rooms/contacts) can share one `TableObserver`; the observer is closed when its subscriber list becomes empty.
+   - On start, prefetches an anonymous BGA session cookie via `axios` (`https://en.boardgamearena.com/`) and refreshes it every 2 hours (`BGA_SESSION_TTL_MS`). The cookie is shared with each new `TableObserver`.
+3. `src/service/tableObserver.ts` — One instance per BGA table. **HTTP polling, no browser.**
+   - Uses `axios` to fetch table info and game state directly from BGA, authenticated with the shared cookie + a CSRF token scraped from the page.
+   - Polls every `POLL_INTERVAL_MS` (60s) once `ready`.
+   - Emits: `ready`, `newPlayerMove` (with new active-player list), `end` (with result payload), `error`.
+   - Updates the shared cookie via an `onCookieUpdate` callback when a fresh `set-cookie` comes back.
+4. `src/config.ts` — Loads and validates env vars; exports `config` (with `token`, `alarmReceiver`, `playerMap`).
+5. `src/helper/logger.ts` — Thin wrapper over Wechaty's `log` that prefixes log lines with the module name.
+6. `src/helper/util.ts` — `stateRegulator()`: collapses whitespace/newlines in BGA state strings.
 
-**Key design detail:** BGA player names are mapped to WeChat contact objects at runtime by `RoomWorker`. `TableObserver` works purely with BGA player names; `RoomWorker` resolves them to WeChat contacts for @mentions.
+**Key design detail:** `TableObserver` only knows BGA player names. `RoomWorker` is the layer that resolves them to WeChat contacts (via `config.playerMap`) when formatting the @-mention message.
 
 ## Docker
 
-The `Dockerfile` builds on Node 18 Alpine with system Chromium pre-installed. Puppeteer is configured to skip its own Chromium download and use the system binary instead (`PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true`).
+The `Dockerfile` is based on `node:20-alpine`. It swaps Alpine's package mirror to USTC, installs a native-build toolchain (`gcc`, `g++`, `make`, `python3`, plus `libsodium`, `ffmpeg`, font/SSL libs), then runs `npm install && npm run dist`. Entrypoint is `node ./dist/index.js`. No Puppeteer / Chromium setup — the current implementation does not use a browser.
