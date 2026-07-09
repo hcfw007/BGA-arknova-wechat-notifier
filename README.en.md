@@ -34,6 +34,7 @@ Optional:
 | Variable | Description |
 |---|---|
 | `ALARM_CONTACT_ID` | WeChat contact ID for the admin / alarm receiver. Errors are forwarded here; private-chat commands are only honored from this contact |
+| `OB_STATE_FILE` | Path of the observation-state file, default `./data/ob-state.json`. Observed tables and their subscribers are persisted on every change and restored automatically after a restart |
 | `PLAYER_<n>_BGA_NAME` | BGA username of the `n`-th player |
 | `PLAYER_<n>_WECHAT_ID` | The corresponding WeChat ID (used for `@`). `<n>` starts at 1; add as many as needed |
 
@@ -63,8 +64,11 @@ docker run --rm -it \
   -e ALARM_CONTACT_ID=... \
   -e PLAYER_1_BGA_NAME=... \
   -e PLAYER_1_WECHAT_ID=... \
+  -v /path/on/host:/app/data \
   arknova-notifier
 ```
+
+Mount the `/app/data` volume so the observation state (`ob-state.json`) survives container restarts — observed tables are restored automatically on startup.
 
 The image is based on `node:20-alpine`, runs `npm install && npm run dist` during build, and starts with `node ./dist/index.js`.
 

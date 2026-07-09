@@ -34,6 +34,7 @@
 | 变量 | 说明 |
 |---|---|
 | `ALARM_CONTACT_ID` | 报警/管理员的微信 contact ID。出错时通知 ta，私聊也只听 ta 的指令 |
+| `OB_STATE_FILE` | OB 状态持久化文件路径，默认 `./data/ob-state.json`。正在 OB 的桌号和订阅者会即时写入该文件，进程重启后自动恢复 |
 | `PLAYER_<n>_BGA_NAME` | 第 n 个玩家在 BGA 上的用户名 |
 | `PLAYER_<n>_WECHAT_ID` | 对应的微信 ID（用于 @）。`<n>` 从 1 开始，按需添加 |
 
@@ -63,8 +64,11 @@ docker run --rm -it \
   -e ALARM_CONTACT_ID=... \
   -e PLAYER_1_BGA_NAME=... \
   -e PLAYER_1_WECHAT_ID=... \
+  -v /path/on/host:/app/data \
   arknova-notifier
 ```
+
+挂载 `/app/data` 卷可以让 OB 状态（`ob-state.json`）在容器重启后保留，重启时自动恢复正在观察的桌子。
 
 镜像基于 `node:20-alpine`，会在容器内执行 `npm install && npm run dist`，启动 `node ./dist/index.js`。
 

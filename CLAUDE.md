@@ -22,6 +22,7 @@ Required:
 Optional:
 
 - `ALARM_CONTACT_ID` — WeChat contact ID that doubles as (a) the admin who can issue commands in a private chat and (b) the recipient of error alarms via `RoomWorker.sendAlarm`.
+- `OB_STATE_FILE` — path of the observation-state JSON file (default `./data/ob-state.json`). `RoomWorker` persists the observed tables + subscribers (via `src/helper/obStateStore.ts`, atomic tmp-file rename) on every change and restores them once on the bot's `ready`/`login` events.
 - `PLAYER_<n>_BGA_NAME` / `PLAYER_<n>_WECHAT_ID` — pair-wise BGA-to-WeChat mapping. `<n>` is any positive integer; `config.ts` scans every env var matching `^PLAYER_\d+_BGA_NAME` and looks up the matching `PLAYER_<n>_WECHAT_ID`.
 
 There is no `.env` loader in the code — vars must already be exported in the process environment (VSCode launch config, shell, Docker `-e`, etc.).
@@ -44,6 +45,7 @@ WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions th
    - Uses `axios` to fetch table info and game state directly from BGA, authenticated with the shared cookie + a CSRF token scraped from the page.
    - Polls every `POLL_INTERVAL_MS` (60s) once `ready`.
    - Emits: `ready`, `newPlayerMove` (with new active-player list), `end` (with result payload), `error`.
+   - Final scores come from `tableinfos.html` → `data.result.player` (BGA redirects the game page of finished tables back to `/table`, so the old gamestate-scraping path only remains as a fallback).
    - Updates the shared cookie via an `onCookieUpdate` callback when a fresh `set-cookie` comes back.
 4. `src/config.ts` — Loads and validates env vars; exports `config` (with `token`, `alarmReceiver`, `playerMap`).
 5. `src/helper/logger.ts` — Thin wrapper over Wechaty's `log` that prefixes log lines with the module name.

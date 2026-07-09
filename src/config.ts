@@ -4,6 +4,7 @@ const requiredConfig = {
 
 const optionalConfig = {
   alarmReceiver: process.env.ALARM_CONTACT_ID,
+  stateFile: process.env.OB_STATE_FILE || './data/ob-state.json',
 } as const
 
 for (const key in requiredConfig) {

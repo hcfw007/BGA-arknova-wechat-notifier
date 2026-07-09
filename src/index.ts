@@ -21,6 +21,7 @@ const bot = WechatyBuilder.build({
 })
 
 let roomWorker: RoomWorker
+let botReady = false
 
 bot.on('scan', (qrcode: string, status: ScanStatus) => {
   if (status === ScanStatus.Waiting) {
@@ -42,8 +43,15 @@ bot.on('scan', (qrcode: string, status: ScanStatus) => {
     roomWorker = new RoomWorker(bot, contact)
   }
 
+  if (botReady) {
+    void roomWorker.restoreState()
+  }
+
 }).on('ready', async () => {
-  // 
+  botReady = true
+  if (roomWorker) {
+    void roomWorker.restoreState()
+  }
 }).on('error', (error: Error) => {
   if (/getContact\(\d+@openim\) is not supported for IM contact/.test(error.message)) {
     // ignore openIm Contact Error
