@@ -59,6 +59,11 @@ export class TableObserver extends EventEmitter {
       }
 
       if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
+        const result = this.resultFromTableInfo(tableInfo)
+        if (result) {
+          this.emit('end', result)
+          return
+        }
         if (tableInfo.gameserver && tableInfo.game_name) {
           this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
           const state = await this.fetchGameState(cookie)
@@ -143,6 +148,11 @@ export class TableObserver extends EventEmitter {
     if (tableInfo) {
       const status = tableInfo.status
       if (status === 'finished' || status === 'archive') {
+        const result = this.resultFromTableInfo(tableInfo)
+        if (result) {
+          this.emit('end', result)
+          return
+        }
         const state = await this.fetchGameState(cookie)
         this.emit('end', state?.args?.result ?? [])
         return
@@ -189,6 +199,19 @@ export class TableObserver extends EventEmitter {
         this.emit('newPlayerMove', newPlayers)
       }
     }
+  }
+
+  private resultFromTableInfo(tableInfo: any): BgaPlayerResult[] | null {
+    const players = tableInfo?.result?.player
+    if (!Array.isArray(players) || players.length === 0) return null
+    return players
+      .map((p: any): BgaPlayerResult => ({
+        name: p.name,
+        score: p.score,
+        score_aux: p.score_aux,
+        rank: Number(p.gamerank),
+      }))
+      .sort((a, b) => a.rank - b.rank)
   }
 
   private getExpectedPlayers(tableInfo: any): string[] {
