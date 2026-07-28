@@ -1,15 +1,25 @@
 import { Contact } from "@juzi/wechaty"
 import axios, { AxiosInstance } from "axios"
 import { EventEmitter } from "events"
+import { BgaPlayerResult, getExpectedPlayers, resultFromTableInfo } from "../helper/bgaPayload"
+import { mergeCookies } from "../helper/cookie"
 import { Logger } from "../helper/logger"
 
 const POLL_INTERVAL_MS = 60 * 1000
+// BGA 匿名会话大约两小时失效，到期前主动换一把
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000
+// 连续失败到这个次数才认定这桌真的挂了，中间的抖动靠重取会话自愈
+const MAX_POLL_FAILURES = 3
+// 首次握手的重试次数与退避基数（第 n 次失败后等 n × base）
+const INIT_MAX_ATTEMPTS = 3
+const INIT_RETRY_BASE_MS = 3000
 
-interface BgaPlayerResult {
-  name: string
-  score: string
-  score_aux: string
-  rank: number
+const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+interface BgaSession {
+  cookie: string
+  token: string
+  obtainedAt: number
 }
 
 interface BgaGameState {
@@ -31,6 +41,9 @@ export class TableObserver extends EventEmitter {
   private gameUrl?: string
   private pollTimer?: NodeJS.Timeout
   private http: AxiosInstance
+  private session?: BgaSession
+  private consecutiveFailures = 0
+  private polling = false
 
   constructor(
     readonly tableId: string,
@@ -46,68 +59,79 @@ export class TableObserver extends EventEmitter {
     })
   }
 
+  /** BGA 偶发 502，首次握手失败不该直接判这桌死刑 */
   async init() {
-    try {
-      this.logger.info('init: getting session and token')
-      const { cookie, token } = await this.getSessionAndToken()
-      this.logger.info('init: got session, fetching table info')
-
-      const tableInfo = await this.fetchTableInfo(cookie, token)
-      if (!tableInfo) {
-        this.emit('error')
+    for (let attempt = 1; attempt <= INIT_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.initOnce()
         return
-      }
-
-      if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
-        const result = this.resultFromTableInfo(tableInfo)
-        if (result) {
-          this.emit('end', result)
-          return
+      } catch (e) {
+        this.logger.warn(`init [table ${this.tableId}] attempt ${attempt}/${INIT_MAX_ATTEMPTS} failed: ${e}`)
+        this.session = undefined
+        this.sharedCookie = undefined
+        if (attempt < INIT_MAX_ATTEMPTS) {
+          await delay(INIT_RETRY_BASE_MS * attempt)
         }
-        if (tableInfo.gameserver && tableInfo.game_name) {
-          this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
-          const state = await this.fetchGameState(cookie)
-          this.emit('end', state?.args?.result ?? [])
-        } else {
-          this.emit('end', [])
-        }
+      }
+    }
+    this.logger.error(`init [table ${this.tableId}] gave up after ${INIT_MAX_ATTEMPTS} attempts`)
+    this.emit('error')
+  }
+
+  private async initOnce() {
+    this.logger.info('init: getting session and token')
+    const { cookie, token } = await this.ensureSession()
+    this.logger.info('init: got session, fetching table info')
+
+    const tableInfo = await this.fetchTableInfo(cookie, token)
+    if (!tableInfo) {
+      throw new Error('tableinfos returned no data')
+    }
+
+    if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
+      const result = resultFromTableInfo(tableInfo)
+      if (result) {
+        this.emit('end', result)
         return
       }
-
-      for (const [id, player] of Object.entries(tableInfo.players as Record<string, { fullname: string }>)) {
-        this.playerIdToName[id] = player.fullname
+      if (tableInfo.gameserver && tableInfo.game_name) {
+        this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+        const state = await this.fetchGameState(cookie).catch(() => null)
+        this.emit('end', state?.args?.result ?? [])
+      } else {
+        this.emit('end', [])
       }
+      return
+    }
 
-      const expectedPlayers = this.getExpectedPlayers(tableInfo)
-      if (expectedPlayers.length > 0) {
-        this.logger.info(`init: found expected players: ${expectedPlayers.join(', ')}`)
-        this.currentPlayers = expectedPlayers
-        this.waitingForJoin = true
-        this.ready = true
-        this.emit('ready')
-        this.startPolling(cookie, token)
-        return
-      }
+    for (const [id, player] of Object.entries(tableInfo.players as Record<string, { fullname: string }>)) {
+      this.playerIdToName[id] = player.fullname
+    }
 
-      this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
-      this.logger.info(`init: got table info, fetching game state from ${this.gameUrl}`)
-
-      const state = await this.fetchGameState(cookie)
-      if (!state) {
-        this.logger.info('could not get initial game state')
-        this.emit('error')
-        return
-      }
-
-      this.logger.info('init: got game state, ready')
-      this.applyState(state)
+    const expectedPlayers = getExpectedPlayers(tableInfo)
+    if (expectedPlayers.length > 0) {
+      this.logger.info(`init: found expected players: ${expectedPlayers.join(', ')}`)
+      this.currentPlayers = expectedPlayers
+      this.waitingForJoin = true
       this.ready = true
       this.emit('ready')
-      this.startPolling(cookie, token)
-    } catch (e) {
-      this.logger.error(`init error: ${e}`)
-      this.emit('error')
+      this.startPolling()
+      return
     }
+
+    this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+    this.logger.info(`init: got table info, fetching game state from ${this.gameUrl}`)
+
+    const state = await this.fetchGameState(cookie)
+    if (!state) {
+      throw new Error('could not get initial game state')
+    }
+
+    this.logger.info('init: got game state, ready')
+    this.applyState(state)
+    this.ready = true
+    this.emit('ready')
+    this.startPolling()
   }
 
   close() {
@@ -130,9 +154,9 @@ export class TableObserver extends EventEmitter {
       .map(id => this.playerIdToName[id] ?? id)
   }
 
-  private startPolling(cookie: string, token: string) {
+  private startPolling() {
     if (!this.pollTimer) {
-      this.pollTimer = setInterval(() => void this.poll(cookie, token), POLL_INTERVAL_MS)
+      this.pollTimer = setInterval(() => void this.poll(), POLL_INTERVAL_MS)
     }
   }
 
@@ -143,48 +167,77 @@ export class TableObserver extends EventEmitter {
     }
   }
 
-  private async poll(cookie: string, token: string) {
+  private async poll() {
+    // BGA 慢起来单轮可能超过 POLL_INTERVAL_MS，setInterval 不会等上一轮，必须自己挡重入
+    if (this.polling) {
+      this.logger.warn(`poll [table ${this.tableId}] skipped: previous round still running`)
+      return
+    }
+    this.polling = true
+    try {
+      await this.pollOnce()
+      this.consecutiveFailures = 0
+    } catch (e) {
+      this.consecutiveFailures++
+      this.logger.warn(`poll [table ${this.tableId}] failed (${this.consecutiveFailures}/${MAX_POLL_FAILURES}): ${e}`)
+      // 多数失败是会话过期或 BGA 抖动，连旧 cookie 一起丢掉，下一轮干净地重新握手
+      this.session = undefined
+      this.sharedCookie = undefined
+      if (this.consecutiveFailures >= MAX_POLL_FAILURES) {
+        this.logger.error(`poll [table ${this.tableId}] gave up after ${this.consecutiveFailures} failures`)
+        this.stopPolling()
+        this.emit('error')
+      }
+    } finally {
+      this.polling = false
+    }
+  }
+
+  private async pollOnce() {
+    const { cookie, token } = await this.ensureSession()
     const tableInfo = await this.fetchTableInfo(cookie, token)
-    if (tableInfo) {
-      const status = tableInfo.status
-      if (status === 'finished' || status === 'archive') {
-        const result = this.resultFromTableInfo(tableInfo)
-        if (result) {
-          this.emit('end', result)
-          return
-        }
-        const state = await this.fetchGameState(cookie)
-        this.emit('end', state?.args?.result ?? [])
+    if (!tableInfo) {
+      throw new Error('tableinfos returned no data')
+    }
+
+    const status = tableInfo.status
+    if (status === 'finished' || status === 'archive') {
+      const result = resultFromTableInfo(tableInfo)
+      if (result) {
+        this.emit('end', result)
         return
       }
+      const state = await this.fetchGameState(cookie).catch(() => null)
+      this.emit('end', state?.args?.result ?? [])
+      return
+    }
 
-      const expectedPlayers = this.getExpectedPlayers(tableInfo)
-      if (expectedPlayers.length > 0) {
-        const prevPlayers = this.currentPlayers
-        this.currentPlayers = expectedPlayers
-        this.waitingForJoin = true
-        this.logger.info(`poll [table ${this.tableId}]: expected players=${expectedPlayers.join(', ')}`)
-        if (prevPlayers) {
-          const prevSet = new Set(prevPlayers)
-          const newPlayers = expectedPlayers.filter(p => !prevSet.has(p))
-          if (newPlayers.length > 0) {
-            this.emit('newPlayerMove', newPlayers)
-          }
+    const expectedPlayers = getExpectedPlayers(tableInfo)
+    if (expectedPlayers.length > 0) {
+      const prevPlayers = this.currentPlayers
+      this.currentPlayers = expectedPlayers
+      this.waitingForJoin = true
+      this.logger.info(`poll [table ${this.tableId}]: expected players=${expectedPlayers.join(', ')}`)
+      if (prevPlayers) {
+        const prevSet = new Set(prevPlayers)
+        const newPlayers = expectedPlayers.filter(p => !prevSet.has(p))
+        if (newPlayers.length > 0) {
+          this.emit('newPlayerMove', newPlayers)
         }
-        return
       }
+      return
+    }
 
-      this.waitingForJoin = false
-      if (!this.gameUrl && tableInfo.gameserver && tableInfo.game_name) {
-        this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
-        this.logger.info(`poll: game started, url=${this.gameUrl}`)
-      }
+    this.waitingForJoin = false
+    if (!this.gameUrl && tableInfo.gameserver && tableInfo.game_name) {
+      this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+      this.logger.info(`poll: game started, url=${this.gameUrl}`)
     }
 
     const state = await this.fetchGameState(cookie)
     if (!state) {
-      this.logger.info('poll: no state returned')
-      return
+      // 进行中的桌子读不到 gamestate，通常意味着被重定向到登录页，按失败处理以触发换会话
+      throw new Error('could not parse gamestate from game page')
     }
 
     const prevPlayers = this.currentPlayers
@@ -201,24 +254,18 @@ export class TableObserver extends EventEmitter {
     }
   }
 
-  private resultFromTableInfo(tableInfo: any): BgaPlayerResult[] | null {
-    const players = tableInfo?.result?.player
-    if (!Array.isArray(players) || players.length === 0) return null
-    return players
-      .map((p: any): BgaPlayerResult => ({
-        name: p.name,
-        score: p.score,
-        score_aux: p.score_aux,
-        rank: Number(p.gamerank),
-      }))
-      .sort((a, b) => a.rank - b.rank)
-  }
-
-  private getExpectedPlayers(tableInfo: any): string[] {
-    if (!tableInfo?.players) return []
-    return Object.values(tableInfo.players as Record<string, { fullname: string; table_status: string }>)
-      .filter(p => p.table_status === 'expected')
-      .map(p => p.fullname)
+  private async ensureSession(): Promise<BgaSession> {
+    if (this.session && Date.now() - this.session.obtainedAt < SESSION_TTL_MS) {
+      return this.session
+    }
+    if (this.session) {
+      // 因过期而刷新：旧 cookie 必须一起丢，否则 BGA 认着旧 PHPSESSID 把同一个会话原样还回来
+      this.sharedCookie = undefined
+    }
+    this.logger.info(`refreshing BGA session for table ${this.tableId}`)
+    const { cookie, token } = await this.getSessionAndToken()
+    this.session = { cookie, token, obtainedAt: Date.now() }
+    return this.session
   }
 
   private async getSessionAndToken(): Promise<{ cookie: string; token: string }> {
@@ -230,8 +277,8 @@ export class TableObserver extends EventEmitter {
       this.sharedCookie ? { headers: { Cookie: this.sharedCookie } } : undefined
     )
 
-    const newCookies = extractCookies(tableRes.headers)
-    const cookie = [this.sharedCookie, newCookies].filter(Boolean).join('; ')
+    const cookie = mergeCookies(this.sharedCookie, extractCookies(tableRes.headers))
+    this.sharedCookie = cookie
     this.onCookieUpdate?.(cookie)
 
     const tokenMatch = (tableRes.data as string).match(/requestToken['":,\s]+([a-f0-9]{64})/)
@@ -259,13 +306,8 @@ export class TableObserver extends EventEmitter {
 
   private async fetchGameState(cookie: string): Promise<BgaGameState | null> {
     if (!this.gameUrl) return null
-    try {
-      const res = await this.http.get(this.gameUrl, { headers: { Cookie: cookie } })
-      return this.parseGameState(res.data as string)
-    } catch (e) {
-      this.logger.error(`fetchGameState error: ${e}`)
-      return null
-    }
+    const res = await this.http.get(this.gameUrl, { headers: { Cookie: cookie } })
+    return this.parseGameState(res.data as string)
   }
 
   private parseGameState(html: string): BgaGameState | null {
