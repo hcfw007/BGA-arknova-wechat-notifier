@@ -2,7 +2,7 @@ import { Contact } from "@juzi/wechaty"
 import axios, { AxiosInstance } from "axios"
 import { EventEmitter } from "events"
 import { BgaPlayerResult, getExpectedPlayers, resultFromTableInfo } from "../helper/bgaPayload"
-import { mergeCookies } from "../helper/cookie"
+import { BgaCredentials, handshake } from "../helper/bgaSession"
 import { Logger } from "../helper/logger"
 
 const POLL_INTERVAL_MS = 60 * 1000
@@ -16,9 +16,7 @@ const INIT_RETRY_BASE_MS = 3000
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
-interface BgaSession {
-  cookie: string
-  token: string
+interface BgaSession extends BgaCredentials {
   obtainedAt: number
 }
 
@@ -268,23 +266,15 @@ export class TableObserver extends EventEmitter {
     return this.session
   }
 
-  private async getSessionAndToken(): Promise<{ cookie: string; token: string }> {
-    const extractCookies = (headers: any): string =>
-      ((headers['set-cookie'] ?? []) as string[]).map(c => c.split(';')[0]).join('; ')
-
-    const tableRes = await this.http.get(
+  private async getSessionAndToken(): Promise<BgaCredentials> {
+    const credentials = await handshake(
+      this.http,
       `https://en.boardgamearena.com/table?table=${this.tableId}`,
-      this.sharedCookie ? { headers: { Cookie: this.sharedCookie } } : undefined
+      this.sharedCookie,
     )
-
-    const cookie = mergeCookies(this.sharedCookie, extractCookies(tableRes.headers))
-    this.sharedCookie = cookie
-    this.onCookieUpdate?.(cookie)
-
-    const tokenMatch = (tableRes.data as string).match(/requestToken['":,\s]+([a-f0-9]{64})/)
-    if (!tokenMatch) throw new Error('could not extract requestToken from table page')
-
-    return { cookie, token: tokenMatch[1] }
+    this.sharedCookie = credentials.cookie
+    this.onCookieUpdate?.(credentials.cookie)
+    return credentials
   }
 
   private async fetchTableInfo(cookie: string, token: string) {

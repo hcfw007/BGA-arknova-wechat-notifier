@@ -14,7 +14,7 @@ npm test        # Unit tests (node:test + ts-node, no extra deps)
 
 ## Tests
 
-`tests/*.spec.ts` run on Node's built-in test runner via `ts-node/register`, type-checked against `tsconfig.test.json`. Coverage is limited to the pure helpers — `parseCommand`, `mergeCookies`, `resultFromTableInfo`, `getExpectedPlayers`. Anything touching Wechaty or the network is not covered.
+`tests/*.spec.ts` run on Node's built-in test runner via `ts-node/register`, type-checked against `tsconfig.test.json`. Coverage is limited to the pure helpers — `parseCommand`, `looksLikePlayerId`, `mergeCookies`, `resultFromTableInfo`, `getExpectedPlayers`, `arkNovaTablesFromPlayerTables`, `pickExactPlayer`, `parseObState`. Anything touching Wechaty or the network is not covered.
 
 Two config details matter:
 
@@ -44,8 +44,11 @@ WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions th
 1. `src/index.ts` — Builds a Wechaty bot with `@juzi/wechaty-puppet-service`, prints the login QR via `qrcode-terminal`, and on `login` instantiates a single `RoomWorker`.
 2. `src/service/roomWorker.ts` — Owns all WeChat message handling.
    - Recognized commands — the **whole message** must be the command (anchored regex, case-insensitive), otherwise chat text that merely ends with a number is ignored:
-     - `ob <tableId>` → start observing
-     - `停止 <tableId>` / `stop <tableId>` → stop observing
+     - `ob <tableId>` → start observing one table
+     - `停止 <tableId>` / `stop <tableId>` → stop observing that table
+     - `订阅 <name|id>` / `subscribe <name|id>` → follow a BGA player: every in-progress Ark Nova table of theirs is auto-observed, and a scan every `PLAYER_SCAN_INTERVAL_MS` (5min) picks up new ones
+     - `退订 <name|id>` / `unsubscribe <name|id>` → stop following. **Tables already being observed are deliberately left running** — use `停止 <tableId>` for those.
+   - `unsubscribe` is matched before `subscribe`: `"unsubscribe x"` ends with `"subscribe x"`, so the looser pattern would swallow it.
    - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact; room commands are honored from anyone in the room (no mention-self requirement — the anchored regex is what keeps false triggers out).
    - Multiple subscribers (rooms/contacts) can share one `TableObserver`. Subscribers are compared **by `.id`**, not by object identity, because a `Room`/`Contact` resolved during state restore is not the same instance as the one carried by an incoming message. When the last subscriber leaves, the observer is closed and its entry is dropped from `tableObserveList`.
    - All outgoing messages go through `RoomWorker.safeSay`, which swallows and logs send failures; `sendAlarm` notifies `ALARM_CONTACT_ID` when an observer errors out or a table fails to restore.
@@ -59,12 +62,21 @@ WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions th
    - Emits: `ready`, `newPlayerMove` (with new active-player list), `end` (with result payload), `error`.
    - Final scores come from `tableinfos.html` → `data.result.player` (BGA redirects the game page of finished tables back to `/table`, so the old gamestate-scraping path only remains as a fallback).
    - Updates the shared cookie via an `onCookieUpdate` callback when a fresh `set-cookie` comes back.
-4. `src/config.ts` — Loads and validates env vars; exports `config` (with `token`, `alarmReceiver`, `playerMap`).
-5. `src/helper/logger.ts` — Thin wrapper over Wechaty's `log` that prefixes log lines with the module name.
-6. `src/helper/util.ts` — `stateRegulator()`: collapses whitespace/newlines in BGA state strings.
-7. `src/helper/command.ts` — `parseCommand()`: the anchored `ob` / `停止` / `stop` regexes. Pure, so it is unit-tested; `RoomWorker` cannot be constructed in a test because its constructor registers bot listeners and fires a network prefetch.
-8. `src/helper/cookie.ts` — `mergeCookies()`: name-keyed cookie merge, incoming wins.
-9. `src/helper/bgaPayload.ts` — `resultFromTableInfo()` / `getExpectedPlayers()`: pure readers over the `tableinfos.html` payload.
+4. `src/service/playerClient.ts` — Player-level BGA queries, **anonymous, no login needed**.
+   - `findPlayerByName()` → `GET /player/player/findplayer.html?q=<name>`. This is a *prefix* search, so `pickExactPlayer()` keeps only **case-sensitive exact** matches; several matches means it reports the candidates and subscribes to nobody.
+   - `listArkNovaTables()` → `POST /tablemanager/tablemanager/tableinfos.html` with body `playerfilter=<id>&turninfo=false&matchmakingtables=false`. Returns every game's tables, so `arkNovaTablesFromPlayerTables()` filters on `game_name === 'arknova'`. The response also carries `data.player.player_fullname`, which is how subscribing by id can still echo a name.
+   - The endpoint needs the same scraped `X-Request-Token` as the table endpoints (806 without it). **A tokenless request poisons the whole session** — subsequent correctly-tokened calls also fail with 806 — so failures must drop the session and re-handshake.
+   - `UnknownPlayerError` separates "no such player" (BGA code 100) from session failures, so a typo'd id does not look like an outage.
+5. `src/config.ts` — Loads and validates env vars; exports `config` (with `token`, `alarmReceiver`, `playerMap`).
+6. `src/helper/logger.ts` — Thin wrapper over Wechaty's `log` that prefixes log lines with the module name.
+7. `src/helper/util.ts` — `stateRegulator()`: collapses whitespace/newlines in BGA state strings.
+8. `src/helper/command.ts` — `parseCommand()` and `looksLikePlayerId()`. Pure, so it is unit-tested; `RoomWorker` cannot be constructed in a test because its constructor registers bot listeners and fires a network prefetch.
+9. `src/helper/cookie.ts` — `mergeCookies()`: name-keyed cookie merge, incoming wins.
+10. `src/helper/bgaSession.ts` — `handshake()`: fetch a page, merge cookies, scrape the 64-hex `requestToken`. Shared by `TableObserver` and `PlayerClient`.
+11. `src/helper/bgaPayload.ts` — pure readers over BGA payloads: `resultFromTableInfo()`, `getExpectedPlayers()`, `arkNovaTablesFromPlayerTables()`, `pickExactPlayer()`.
+12. `src/helper/obState.ts` — `parseObState()`: the persisted-state schema and its migration.
+
+**State file format:** v1 was a bare `PersistedTable[]`; v2 is `{ tables, players }`. `parseObState()` still accepts the v1 array — a running instance has one on disk, and rejecting it would drop every observed table on upgrade.
 
 **Key design detail:** `TableObserver` only knows BGA player names. `RoomWorker` is the layer that resolves them to WeChat contacts (via `config.playerMap`) when formatting the @-mention message.
 
