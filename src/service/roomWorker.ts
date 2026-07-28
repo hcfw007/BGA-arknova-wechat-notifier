@@ -1,5 +1,6 @@
 import { Contact, Message, Room, Wechaty, types } from "@juzi/wechaty"
 import axios from "axios"
+import { parseCommand } from "../helper/command"
 import { Logger } from "../helper/logger"
 import { ObStateStore, PersistedTable } from "../helper/obStateStore"
 import { TableObserver } from "./tableObserver"
@@ -23,6 +24,7 @@ export class RoomWorker {
     this.bot.on('message', (message: Message) => {
       if (message.type() !== types.Message.Text) {
         this.logger.verbose('non-text message will be ignored')
+        return
       }
       if (message.room()) {
         void this.handleRoomMessage(message)
@@ -102,6 +104,7 @@ export class RoomWorker {
         }
       } catch (e) {
         this.logger.error(`restore table ${table.tableId} failed: ${e}`)
+        void this.sendAlarm(`恢复Ob游戏桌${table.tableId}失败：${e}`)
       }
     }
 
@@ -109,69 +112,75 @@ export class RoomWorker {
     this.logger.info('ob state restore complete')
   }
 
-  sendAlarm(alarmText: string): Promise<void | Message> {
-    if (this.contact) {
-      return this.contact.say(alarmText)
+  async sendAlarm(alarmText: string): Promise<void> {
+    if (!this.contact) {
+      return
     }
+    try {
+      await this.contact.say(alarmText)
+    } catch (e) {
+      this.logger.error(`sendAlarm failed: ${e}`)
+    }
+  }
+
+  /** 统一发送出口：say 失败只记日志，不冒泡成 unhandledRejection */
+  private async safeSay(target: Contact | Room, text: string, mentionList?: (Contact | '@all')[]) {
+    try {
+      await target.say(text, mentionList ? { mentionList } : undefined)
+    } catch (e) {
+      this.logger.error(`messageSendError, ${(e as Error).stack}`)
+    }
+  }
+
+  private async handleCommand(text: string, reportTarget: Contact | Room) {
+    const command = parseCommand(text)
+    if (!command) {
+      return
+    }
+    if (command.action === 'stop') {
+      return this.unSubscribeTable(command.tableId, reportTarget)
+    }
+    return this.subscribeTable(command.tableId, reportTarget)
   }
 
   async handleAdminMessage(message: Message) {
-    const text = message.text()
-
-    if (/停止 \d+$/.test(text) || /stop \d+$/.test(text)) {
-      const table = /\d+$/.exec(text)[0]
-      return this.unSubscribeTable(table, message.talker())
-    }
-
-    if (/^Ob \d+$/.test(text) || /^ob \d+$/.test(text)) {
-      const table = /\d+$/.exec(text)[0]
-      return this.subscribeTable(table, message.talker())
-    }
+    return this.handleCommand(message.text(), message.talker())
   }
 
   async handleRoomMessage(message: Message) {
-    // if (!await message.mentionSelf()) {
-    //   return
-    // }
-    const text = message.text()
-
-    if (/停止 \d+$/.test(text) || /stop \d+$/.test(text)) {
-      const table = /\d+$/.exec(text)[0]
-      return this.unSubscribeTable(table, message.room())
-    }
-
-    if (/Ob \d+$/.test(text) || /ob \d+$/.test(text)) {
-      const table = /\d+$/.exec(text)[0]
-      return this.subscribeTable(table, message.room())
-    }
+    // 群内不限定发言人，也不要求 @机器人：命令已锚定为整条消息，误触发风险可控
+    return this.handleCommand(message.text(), message.room())
   }
 
   async unSubscribeTable(tableId: string, reportTarget: Contact | Room) {
     const tableObserve = this.tableObserveList.find(ob => ob.tableId === tableId)
     if (!tableObserve) {
-      reportTarget.say(`没有在Ob ${tableId}`)
-    } else {
-      tableObserve.subscribers = tableObserve.subscribers.filter(item => item !== reportTarget)
-      if (tableObserve.subscribers.length === 0) {
-        tableObserve.observer.close()
-      }
-      this.persistState()
-      reportTarget.say(`已停止Ob ${tableId}`)
+      await this.safeSay(reportTarget, `没有在Ob ${tableId}`)
+      return
     }
+
+    // 按 id 比对：重启恢复出来的 Room/Contact 和消息里带的不是同一个实例
+    tableObserve.subscribers = tableObserve.subscribers.filter(item => item.id !== reportTarget.id)
+    if (tableObserve.subscribers.length === 0) {
+      tableObserve.observer.close()
+      this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
+    }
+    this.persistState()
+    await this.safeSay(reportTarget, `已停止Ob ${tableId}`)
   }
 
   async subscribeTable(tableId: string, reportTarget: Contact | Room, announce = true) {
     await reportTarget.sync()
     if (announce) {
-      await reportTarget.say(`收到Ob ${tableId}，请稍等...`)
+      await this.safeSay(reportTarget, `收到Ob ${tableId}，请稍等...`)
     }
     this.logger.info(`will observe table ${tableId} and report to ${reportTarget}`)
 
     const tableObserve = this.tableObserveList.find(ob => ob.tableId === tableId)
     if (tableObserve) {
-      if (tableObserve.subscribers.includes(reportTarget)) {
+      if (tableObserve.subscribers.some(item => item.id === reportTarget.id)) {
         if (announce) {
-          reportTarget.say(`已经在Ob ${tableId}了 `)
+          await this.safeSay(reportTarget, `已经在Ob ${tableId}了 `)
         }
       } else {
         tableObserve.subscribers.push(reportTarget)
@@ -214,9 +223,7 @@ export class RoomWorker {
     tableObserve.observer.on('ready', () => {
       this.logger.info(`table ${tableObserve.tableId} ready`)
       tableObserve.subscribers.forEach(target => {
-        target.say(`成功OB游戏桌${tableObserve.tableId}`).catch((e: Error) => {
-          this.logger.error(`messageSendError, ${e.stack}`)
-        })
+        void this.safeSay(target, `成功OB游戏桌${tableObserve.tableId}`)
       })
       this.reportCurrentState(tableObserve)
     }).on('end', (result: { name: string; score: string; rank: number }[]) => {
@@ -228,9 +235,7 @@ export class RoomWorker {
       }
       lines.push('停止OB')
       tableObserve.subscribers.forEach(target => {
-        target.say(lines.join('\n')).catch((e: Error) => {
-          this.logger.error(`messageSendError, ${e.stack}`)
-        })
+        void this.safeSay(target, lines.join('\n'))
       })
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
       this.persistState()
@@ -239,10 +244,9 @@ export class RoomWorker {
     }).on('error', () => {
       tableObserve.observer.close()
       this.bgaCookie = undefined // invalidate session on error
+      void this.sendAlarm(`游戏桌${tableObserve.tableId}观测失败，已停止OB`)
       tableObserve.subscribers.forEach(target => {
-        target.say(`游戏桌${tableObserve.tableId}发生错误，停止OB`).catch((e: Error) => {
-          this.logger.error(`messageSendError, ${e.stack}`)
-        })
+        void this.safeSay(target, `游戏桌${tableObserve.tableId}发生错误，停止OB`)
       })
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
       this.persistState()
@@ -252,7 +256,7 @@ export class RoomWorker {
   reportCurrentState(tableObserve: TableObserve) {
     const players = tableObserve.observer.currentPlayers
     const waiting = tableObserve.observer.waitingForJoin
-    const contacts = []
+    const contacts: (Contact | '@all')[] = []
     let str = `[桌号${tableObserve.tableId}] `
 
     if (waiting) {
@@ -281,11 +285,7 @@ export class RoomWorker {
     }
     tableObserve.subscribers.forEach(target => {
       this.logger.info(`saying ${str} to ${target}, mentioning ${contacts}`)
-      target.say(str, {
-        mentionList: contacts
-      }).catch((e: Error) => {
-        this.logger.error(`messageSendError, ${e.stack}`)
-      })
+      void this.safeSay(target, str, contacts)
     })
   }
 }
