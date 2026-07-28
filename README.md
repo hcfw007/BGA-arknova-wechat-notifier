@@ -1,6 +1,9 @@
 # BGA-arknova-wechat-notifier
 
 [![CI](https://github.com/hcfw007/BGA-arknova-wechat-notifier/actions/workflows/publish.yml/badge.svg)](https://github.com/hcfw007/BGA-arknova-wechat-notifier/actions/workflows/publish.yml)
+[![Docker Image Version](https://img.shields.io/docker/v/hcfw007/bga-arknova-wechat-notifier?sort=semver&logo=docker)](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier)
+[![Docker Pulls](https://img.shields.io/docker/pulls/hcfw007/bga-arknova-wechat-notifier)](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier)
+[![License](https://img.shields.io/github/license/hcfw007/BGA-arknova-wechat-notifier)](./LICENSE)
 
 > English: [README.en.md](./README.en.md)
 
@@ -82,6 +85,16 @@ npm start        # 启动；首次登录时终端会打印二维码
 ```
 
 ## Docker
+
+每次发版都会自动构建并推送镜像到 [Docker Hub](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier)，直接拉现成的即可：
+
+```bash
+docker pull hcfw007/bga-arknova-wechat-notifier:1.1.1
+```
+
+镜像只打版本号 tag（没有 `latest`），版本号见上方徽章。
+
+也可以自己构建：
 
 ```bash
 docker build -t arknova-notifier .

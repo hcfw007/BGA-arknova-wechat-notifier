@@ -1,6 +1,9 @@
 # BGA-arknova-wechat-notifier
 
 [![CI](https://github.com/hcfw007/BGA-arknova-wechat-notifier/actions/workflows/publish.yml/badge.svg)](https://github.com/hcfw007/BGA-arknova-wechat-notifier/actions/workflows/publish.yml)
+[![Docker Image Version](https://img.shields.io/docker/v/hcfw007/bga-arknova-wechat-notifier?sort=semver&logo=docker)](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier)
+[![Docker Pulls](https://img.shields.io/docker/pulls/hcfw007/bga-arknova-wechat-notifier)](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier)
+[![License](https://img.shields.io/github/license/hcfw007/BGA-arknova-wechat-notifier)](./LICENSE)
 
 > 中文版: [README.md](./README.md)
 
@@ -84,6 +87,16 @@ npm start        # Start; a QR code will be printed in the terminal on first log
 ```
 
 ## Docker
+
+Every release is built and pushed to [Docker Hub](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier) automatically, so you can just pull it:
+
+```bash
+docker pull hcfw007/bga-arknova-wechat-notifier:1.1.1
+```
+
+Images are tagged by version only — there is no `latest`. The current version is on the badge above.
+
+Or build it yourself:
 
 ```bash
 docker build -t arknova-notifier .
