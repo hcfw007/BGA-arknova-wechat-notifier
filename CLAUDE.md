@@ -43,13 +43,14 @@ WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions th
 
 1. `src/index.ts` — Builds a Wechaty bot with `@juzi/wechaty-puppet-service`, prints the login QR via `qrcode-terminal`, and on `login` instantiates a single `RoomWorker`.
 2. `src/service/roomWorker.ts` — Owns all WeChat message handling.
-   - Recognized commands — the **whole message** must be the command (anchored regex, case-insensitive), otherwise chat text that merely ends with a number is ignored:
+   - Recognized commands — the command must **end** the message (case-insensitive). The start is deliberately *not* anchored, because a room message that @-mentions the bot arrives with a `@<botname>` prefix in `text()`. False triggers are kept out by requiring the mention, not by the regex:
      - `ob <tableId>` → start observing one table
      - `停止 <tableId>` / `stop <tableId>` → stop observing that table
      - `订阅 <name|id>` / `subscribe <name|id>` → follow a BGA player: every in-progress Ark Nova table of theirs is auto-observed, and a scan every `PLAYER_SCAN_INTERVAL_MS` (5min) picks up new ones
      - `退订 <name|id>` / `unsubscribe <name|id>` → stop following. **Tables already being observed are deliberately left running** — use `停止 <tableId>` for those.
    - `unsubscribe` is matched before `subscribe`: `"unsubscribe x"` ends with `"subscribe x"`, so the looser pattern would swallow it.
-   - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact; room commands are honored from anyone in the room (no mention-self requirement — the anchored regex is what keeps false triggers out).
+   - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact. **Room commands require an @-mention of the bot** (`isMentioningSelf`, which trusts `message.mentionSelf()` and falls back to searching `text()` for `@<bot name>` when the puppet gives no `mentionIdList`).
+   - `safeSay` must never forward an `undefined` second argument to `say()`. `Room.say` treats trailing arguments as a variadic mention list, so `say(text, undefined)` becomes `mentionList: [undefined]` and throws `mentionList must be contact when not using TemplateStringsArray function call.` — which silently killed *every* plain-text room reply.
    - Multiple subscribers (rooms/contacts) can share one `TableObserver`. Subscribers are compared **by `.id`**, not by object identity, because a `Room`/`Contact` resolved during state restore is not the same instance as the one carried by an incoming message. When the last subscriber leaves, the observer is closed and its entry is dropped from `tableObserveList`.
    - All outgoing messages go through `RoomWorker.safeSay`, which swallows and logs send failures; `sendAlarm` notifies `ALARM_CONTACT_ID` when an observer errors out or a table fails to restore.
    - On start, prefetches an anonymous BGA session cookie via `axios` (`https://en.boardgamearena.com/`) and refreshes it every 2 hours (`BGA_SESSION_TTL_MS`). The cookie is shared with each new `TableObserver`.
