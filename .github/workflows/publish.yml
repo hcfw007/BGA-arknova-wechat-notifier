@@ -42,13 +42,25 @@ jobs:
       - name: Login to DockerHub Registry
         run: echo ${{ secrets.DOCKER_PERSONAL_ACCESS_TOKEN }} | docker login -u hcfw007 --password-stdin
 
-      - name: Build the Docker image & Upload to DockerHub
+      - name: Resolve the image tag from package.json
+        id: image
+        run: echo "ref=hcfw007/bga-arknova-wechat-notifier:$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+
+      # 版本没变的提交（改文档、改 CI 等）不该重新构建并覆盖已发布的镜像。
+      # 只有 inspect 成功才判定「已存在」——网络或鉴权抖动会走到 else 去构建，
+      # 宁可白构建一次，也不能因为一次误判把该发的版本跳过。
+      - name: Check whether the tag is already published
+        id: published
         run: |
-          export IMAGE_TAG=$(cat package.json \
-            | grep version \
-            | head -1 \
-            | awk -F: '{ print $2 }' \
-            | sed 's/[",]//g' \
-            | tr -d '[[:space:]]')
-          docker build -t hcfw007/bga-arknova-wechat-notifier:$IMAGE_TAG .
-          docker push hcfw007/bga-arknova-wechat-notifier:$IMAGE_TAG
+          if docker manifest inspect "${{ steps.image.outputs.ref }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.image.outputs.ref }} already published, skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the Docker image & Upload to DockerHub
+        if: steps.published.outputs.exists == 'false'
+        run: |
+          docker build -t "${{ steps.image.outputs.ref }}" .
+          docker push "${{ steps.image.outputs.ref }}"
