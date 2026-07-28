@@ -89,10 +89,10 @@ npm start        # 启动；首次登录时终端会打印二维码
 每次发版都会自动构建并推送镜像到 [Docker Hub](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier)，直接拉现成的即可：
 
 ```bash
-docker pull hcfw007/bga-arknova-wechat-notifier:1.1.1
+docker pull hcfw007/bga-arknova-wechat-notifier:latest
 ```
 
-镜像只打版本号 tag（没有 `latest`），版本号见上方徽章。
+`latest` 始终指向最新发布的版本。生产环境建议钉死版本号（`:1.1.1` 这样），出问题时才能干净地回滚到上一个版本。
 
 也可以自己构建：
 

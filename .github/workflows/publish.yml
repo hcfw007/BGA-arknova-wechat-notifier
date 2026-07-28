@@ -42,25 +42,47 @@ jobs:
       - name: Login to DockerHub Registry
         run: echo ${{ secrets.DOCKER_PERSONAL_ACCESS_TOKEN }} | docker login -u hcfw007 --password-stdin
 
-      - name: Resolve the image tag from package.json
+      - name: Resolve the image tags from package.json
         id: image
-        run: echo "ref=hcfw007/bga-arknova-wechat-notifier:$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
-
-      # 版本没变的提交（改文档、改 CI 等）不该重新构建并覆盖已发布的镜像。
-      # 只有 inspect 成功才判定「已存在」——网络或鉴权抖动会走到 else 去构建，
-      # 宁可白构建一次，也不能因为一次误判把该发的版本跳过。
-      - name: Check whether the tag is already published
-        id: published
         run: |
-          if docker manifest inspect "${{ steps.image.outputs.ref }}" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::${{ steps.image.outputs.ref }} already published, skipping build"
+          REPO=hcfw007/bga-arknova-wechat-notifier
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REPO:$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+
+      # 三种情况：版本没发过就构建；发过但 :latest 没指向它就只补 tag；都到位就跳过。
+      # 版本没变的提交（改文档、改 CI 等）因此不会重新构建并覆盖已发布的镜像。
+      # digest 取不到一律当作「缺失」——网络或鉴权抖动会多做一次构建/打 tag，
+      # 宁可白做一次，也不能因为一次误判把该发的版本跳过。
+      - name: Decide what needs publishing
+        id: plan
+        run: |
+          digest() { docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1" 2>/dev/null || true; }
+          VERSION_DIGEST=$(digest "${{ steps.image.outputs.ref }}")
+          LATEST_DIGEST=$(digest "${{ steps.image.outputs.repo }}:latest")
+
+          if [ -z "$VERSION_DIGEST" ]; then
+            echo "action=build" >> "$GITHUB_OUTPUT"
+          elif [ "$VERSION_DIGEST" != "$LATEST_DIGEST" ]; then
+            echo "action=retag" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.image.outputs.ref }} exists; moving :latest onto it"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "action=skip" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.image.outputs.ref }} and :latest are both current, nothing to publish"
           fi
 
       - name: Build the Docker image & Upload to DockerHub
-        if: steps.published.outputs.exists == 'false'
+        if: steps.plan.outputs.action == 'build'
         run: |
-          docker build -t "${{ steps.image.outputs.ref }}" .
+          docker build \
+            -t "${{ steps.image.outputs.ref }}" \
+            -t "${{ steps.image.outputs.repo }}:latest" .
           docker push "${{ steps.image.outputs.ref }}"
+          docker push "${{ steps.image.outputs.repo }}:latest"
+
+      # registry 侧直接复制 manifest，不重新构建也不拉取镜像
+      - name: Point :latest at the current version
+        if: steps.plan.outputs.action == 'retag'
+        run: |
+          docker buildx imagetools create \
+            -t "${{ steps.image.outputs.repo }}:latest" \
+            "${{ steps.image.outputs.ref }}"

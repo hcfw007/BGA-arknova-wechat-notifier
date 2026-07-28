@@ -91,10 +91,10 @@ npm start        # Start; a QR code will be printed in the terminal on first log
 Every release is built and pushed to [Docker Hub](https://hub.docker.com/r/hcfw007/bga-arknova-wechat-notifier) automatically, so you can just pull it:
 
 ```bash
-docker pull hcfw007/bga-arknova-wechat-notifier:1.1.1
+docker pull hcfw007/bga-arknova-wechat-notifier:latest
 ```
 
-Images are tagged by version only — there is no `latest`. The current version is on the badge above.
+`latest` always points at the most recent release. For anything you actually depend on, pin the version (`:1.1.1`) — that is what makes a rollback possible.
 
 Or build it yourself:
 
