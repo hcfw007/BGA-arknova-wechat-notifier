@@ -184,7 +184,14 @@ export class RoomWorker {
   /** 统一发送出口：say 失败只记日志，不冒泡成 unhandledRejection */
   private async safeSay(target: Contact | Room, text: string, mentionList?: (Contact | '@all')[]) {
     try {
-      await target.say(text, mentionList ? { mentionList } : undefined)
+      // 必须区分「不传第二个参数」和「传 undefined」：Room.say 把变长参数当 mentionList，
+      // say(text, undefined) 会被解析成 mentionList=[undefined] 而抛
+      // "mentionList must be contact when not using TemplateStringsArray function call."
+      if (mentionList?.length) {
+        await target.say(text, { mentionList })
+      } else {
+        await target.say(text)
+      }
     } catch (e) {
       this.logger.error(`messageSendError, ${(e as Error).stack}`)
     }
@@ -211,8 +218,26 @@ export class RoomWorker {
     return this.handleCommand(message.text(), message.talker())
   }
 
+  /**
+   * 群里必须 @机器人 才认命令——这是防误触发的唯一手段，因为正则不锚定开头。
+   * mentionSelf 依赖 puppet 给的 mentionIdList，拿不到时退回文本里找 @机器人名。
+   */
+  private isMentioningSelf(message: Message): boolean {
+    try {
+      if (message.mentionSelf()) {
+        return true
+      }
+    } catch (e) {
+      this.logger.warn(`mentionSelf check failed, falling back to text: ${e}`)
+    }
+    const selfName = this.bot.currentUser?.name()
+    return !!selfName && message.text().includes(`@${selfName}`)
+  }
+
   async handleRoomMessage(message: Message) {
-    // 群内不限定发言人，也不要求 @机器人：命令已锚定为整条消息，误触发风险可控
+    if (!this.isMentioningSelf(message)) {
+      return
+    }
     return this.handleCommand(message.text(), message.room())
   }
 
