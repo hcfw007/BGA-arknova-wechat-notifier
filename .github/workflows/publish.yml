@@ -56,7 +56,18 @@ jobs:
       - name: Decide what needs publishing
         id: plan
         run: |
-          digest() { docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1" 2>/dev/null || true; }
+          # 归一化到底层 manifest 再比较：`imagetools create` 会把源 manifest 包一层
+          # manifest list，:latest 的顶层 digest 因此永远不等于版本 tag 的，
+          # 直接比会导致每次推送都重复 retag，skip 分支形同虚设。
+          digest() {
+            raw=$(docker buildx imagetools inspect --raw "$1" 2>/dev/null) || return 0
+            child=$(printf '%s' "$raw" | jq -r '.manifests[0].digest // empty')
+            if [ -n "$child" ]; then
+              printf '%s' "$child"
+            else
+              docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1" 2>/dev/null || true
+            fi
+          }
           VERSION_DIGEST=$(digest "${{ steps.image.outputs.ref }}")
           LATEST_DIGEST=$(digest "${{ steps.image.outputs.repo }}:latest")
 
