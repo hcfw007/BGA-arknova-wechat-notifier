@@ -4,7 +4,7 @@
   "description": "@you in a wechat room when it's your turn in BGA arknova",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "TS_NODE_PROJECT=tsconfig.test.json node --test --require ts-node/register tests/*.spec.ts",
     "dist": "tsc",
     "start": "node ./dist/index.js",
     "dev": "sh ./run-test.sh"

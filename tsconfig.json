@@ -1,6 +1,9 @@
 {
   "compilerOptions": {
     "outDir": "dist",
+    // 固定产物布局：dist/index.js。不写死的话，一旦 include 命中 src 以外的目录，
+    // tsc 推断的 rootDir 会上移到项目根，产物变成 dist/src/index.js，npm start 与 Dockerfile 同时失效
+    "rootDir": "src",
     "module": "commonjs",
     "moduleResolution": "node",
     "esModuleInterop": true,
@@ -33,6 +36,5 @@
     "examples/**/*.ts",
     "scripts/**/*.ts",
     "src/**/*.ts",
-    "tests/**/*.spec.ts",
   ],
 }
