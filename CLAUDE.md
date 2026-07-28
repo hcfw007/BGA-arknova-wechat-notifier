@@ -7,11 +7,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run dist    # Compile TypeScript → dist/
 npm start       # Run compiled app (node ./dist/index.js)
+npm test        # Unit tests (node:test + ts-node, no extra deps)
 ```
 
 `npm run dev` is declared in `package.json` but references `run-test.sh`, which is not in the repo — the script will fail unless someone reintroduces that file.
 
-There are no automated tests.
+## Tests
+
+`tests/*.spec.ts` run on Node's built-in test runner via `ts-node/register`, type-checked against `tsconfig.test.json`. Coverage is limited to the pure helpers — `parseCommand`, `mergeCookies`, `resultFromTableInfo`, `getExpectedPlayers`. Anything touching Wechaty or the network is not covered.
+
+Two config details matter:
+
+- `tsconfig.json` pins `"rootDir": "src"`. Without it, adding any include outside `src/` moves tsc's inferred root to the project root and the build silently starts emitting `dist/src/index.js`, breaking both `npm start` and the Dockerfile entrypoint.
+- `tsconfig.test.json` (extends the base, `noEmit`, `rootDir: "./"`) is the only config that sees `tests/`; the build config must not.
 
 ## Environment Setup
 
@@ -35,21 +43,28 @@ WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions th
 
 1. `src/index.ts` — Builds a Wechaty bot with `@juzi/wechaty-puppet-service`, prints the login QR via `qrcode-terminal`, and on `login` instantiates a single `RoomWorker`.
 2. `src/service/roomWorker.ts` — Owns all WeChat message handling.
-   - Recognized commands (regex-matched on message text):
-     - `Ob <tableId>` / `ob <tableId>` → start observing
+   - Recognized commands — the **whole message** must be the command (anchored regex, case-insensitive), otherwise chat text that merely ends with a number is ignored:
+     - `ob <tableId>` → start observing
      - `停止 <tableId>` / `stop <tableId>` → stop observing
-   - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact; room commands are honored from anyone in the room (mention-self check is currently commented out).
-   - Multiple subscribers (rooms/contacts) can share one `TableObserver`; the observer is closed when its subscriber list becomes empty.
+   - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact; room commands are honored from anyone in the room (no mention-self requirement — the anchored regex is what keeps false triggers out).
+   - Multiple subscribers (rooms/contacts) can share one `TableObserver`. Subscribers are compared **by `.id`**, not by object identity, because a `Room`/`Contact` resolved during state restore is not the same instance as the one carried by an incoming message. When the last subscriber leaves, the observer is closed and its entry is dropped from `tableObserveList`.
+   - All outgoing messages go through `RoomWorker.safeSay`, which swallows and logs send failures; `sendAlarm` notifies `ALARM_CONTACT_ID` when an observer errors out or a table fails to restore.
    - On start, prefetches an anonymous BGA session cookie via `axios` (`https://en.boardgamearena.com/`) and refreshes it every 2 hours (`BGA_SESSION_TTL_MS`). The cookie is shared with each new `TableObserver`.
 3. `src/service/tableObserver.ts` — One instance per BGA table. **HTTP polling, no browser.**
    - Uses `axios` to fetch table info and game state directly from BGA, authenticated with the shared cookie + a CSRF token scraped from the page.
-   - Polls every `POLL_INTERVAL_MS` (60s) once `ready`.
+   - Polls every `POLL_INTERVAL_MS` (60s) once `ready`. The session (cookie + CSRF token) lives in the observer and is re-fetched by `ensureSession()` once it is older than `SESSION_TTL_MS` (2h) — it is no longer frozen in the polling closure.
+   - Every poll is wrapped in try/catch. A failure drops the cached session/cookie so the next tick re-handshakes; only after `MAX_POLL_FAILURES` (3) consecutive failures does the observer stop polling and emit `error`. Cookie strings are merged by name (`mergeCookies`) so refreshes don't accumulate duplicates, and a TTL-triggered refresh discards the old cookie — otherwise BGA hands the same session straight back.
+   - `init()` retries `initOnce()` up to `INIT_MAX_ATTEMPTS` (3) with linear backoff before emitting `error`. BGA returns sporadic 502s and 30s timeouts on the table page; without this a single blip killed the whole subscription.
+   - `poll()` guards against re-entry with a `polling` flag: a slow round (up to 3 requests × 30s timeout) can outlast the 60s interval, and `setInterval` does not wait.
    - Emits: `ready`, `newPlayerMove` (with new active-player list), `end` (with result payload), `error`.
    - Final scores come from `tableinfos.html` → `data.result.player` (BGA redirects the game page of finished tables back to `/table`, so the old gamestate-scraping path only remains as a fallback).
    - Updates the shared cookie via an `onCookieUpdate` callback when a fresh `set-cookie` comes back.
 4. `src/config.ts` — Loads and validates env vars; exports `config` (with `token`, `alarmReceiver`, `playerMap`).
 5. `src/helper/logger.ts` — Thin wrapper over Wechaty's `log` that prefixes log lines with the module name.
 6. `src/helper/util.ts` — `stateRegulator()`: collapses whitespace/newlines in BGA state strings.
+7. `src/helper/command.ts` — `parseCommand()`: the anchored `ob` / `停止` / `stop` regexes. Pure, so it is unit-tested; `RoomWorker` cannot be constructed in a test because its constructor registers bot listeners and fires a network prefetch.
+8. `src/helper/cookie.ts` — `mergeCookies()`: name-keyed cookie merge, incoming wins.
+9. `src/helper/bgaPayload.ts` — `resultFromTableInfo()` / `getExpectedPlayers()`: pure readers over the `tableinfos.html` payload.
 
 **Key design detail:** `TableObserver` only knows BGA player names. `RoomWorker` is the layer that resolves them to WeChat contacts (via `config.playerMap`) when formatting the @-mention message.
 

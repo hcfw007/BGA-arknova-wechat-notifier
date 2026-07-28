@@ -4,13 +4,40 @@ on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
-  publish:
-    name: Publish
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
+
+      # 与 Dockerfile 的 node:20-alpine 保持一致
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run dist
+
+      - name: Type-check tests
+        run: npx tsc --noEmit -p tsconfig.test.json
+
+      - name: Unit tests
+        run: npm test
+
+  publish:
+    name: Publish
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Login to DockerHub Registry
         run: echo ${{ secrets.DOCKER_PERSONAL_ACCESS_TOKEN }} | docker login -u hcfw007 --password-stdin
