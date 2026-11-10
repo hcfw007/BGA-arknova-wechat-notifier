@@ -5,7 +5,7 @@ import { looksLikePlayerId, parseCommand } from "../helper/command"
 import { Logger } from "../helper/logger"
 import { ObStateStore, PersistedPlayer, PersistedSubscriber, PersistedTable } from "../helper/obStateStore"
 import { PlayerClient, UnknownPlayerError } from "./playerClient"
-import { TableObserver } from "./tableObserver"
+import { ObserverPausedEvent, ObserverRecoveredEvent, ObserverRetryingEvent, TableObserver } from "./tableObserver"
 import { config } from "../config"
 
 const BGA_SESSION_TTL_MS = 2 * 60 * 60 * 1000 // 2 hours
@@ -27,6 +27,7 @@ export class RoomWorker {
   private readonly playerClient = new PlayerClient()
   private playerScanTimer?: NodeJS.Timeout
   private scanningPlayers = false
+  private readonly retryNoticeAt = new Map<string, number>()
 
   constructor(private readonly bot: Wechaty, private readonly contact?: Contact) {
     void this.prefetchBgaSession()
@@ -179,6 +180,16 @@ export class RoomWorker {
     } catch (e) {
       this.logger.error(`sendAlarm failed: ${e}`)
     }
+  }
+
+  private formatRetryTime(timestamp: number): string {
+    if (!Number.isFinite(timestamp) || Math.abs(timestamp) > 8_640_000_000_000_000) return `epoch ${timestamp}`
+    const formatted = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(timestamp)
+    return `北京时间 ${formatted}（UTC+08:00）`
   }
 
   /** 统一发送出口：say 失败只记日志，不冒泡成 unhandledRejection */
@@ -416,6 +427,7 @@ export class RoomWorker {
     tableObserve.subscribers = tableObserve.subscribers.filter(item => item.id !== reportTarget.id)
     if (tableObserve.subscribers.length === 0) {
       tableObserve.observer.close()
+      this.retryNoticeAt.delete(tableId)
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
     }
     this.persistState()
@@ -439,11 +451,17 @@ export class RoomWorker {
         await this.safeSay(reportTarget, `已经在Ob ${tableId}了 `)
       }
 
-      // 已经 ready 的桌子补发一次现状。老订阅者只在自己主动发命令时补发，
-      // 否则重启恢复和自动扫描会让同一张桌被反复播报
-      if (tableObserve.observer.ready && (isNewSubscriber || announce)) {
+      const status = tableObserve.observer.status
+      if (status.kind === 'retrying' && (isNewSubscriber || announce)) {
+        const elapsedMinutes = Math.floor(status.elapsed / 60_000)
+        await this.safeSay(reportTarget, `游戏桌${tableId}正在恢复连接（${status.failure.reason}，异常持续${elapsedMinutes}分钟），下次尝试时间：${this.formatRetryTime(status.nextRetryAt)}`)
+      } else if (status.kind === 'paused' && (isNewSubscriber || announce)) {
+        const elapsedMinutes = Math.floor(status.elapsedMs / 60_000)
+        await this.safeSay(reportTarget, `游戏桌${tableId}观测已暂停（${status.failure.reason}，异常持续${elapsedMinutes}分钟），订阅保留；请检查后重试`)
+      } else if (status.kind === 'ready' && (isNewSubscriber || announce)) {
         this.reportCurrentState(tableObserve)
       }
+      if (announce && status.kind === 'paused') tableObserve.observer.retryNow()
 
       return
     }
@@ -494,18 +512,31 @@ export class RoomWorker {
         void this.safeSay(target, lines.join('\n'))
       })
       this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
+      this.retryNoticeAt.delete(tableObserve.tableId)
       this.persistState()
     }).on('newPlayerMove', () => {
       this.reportCurrentState(tableObserve)
-    }).on('error', () => {
-      tableObserve.observer.close()
-      this.bgaCookie = undefined // invalidate session on error
-      void this.sendAlarm(`游戏桌${tableObserve.tableId}观测失败，已停止OB`)
-      tableObserve.subscribers.forEach(target => {
-        void this.safeSay(target, `游戏桌${tableObserve.tableId}发生错误，停止OB`)
-      })
-      this.tableObserveList = this.tableObserveList.filter(item => item !== tableObserve)
-      this.persistState()
+    }).on('retrying', (state: ObserverRetryingEvent) => {
+      if (state.manual) this.retryNoticeAt.delete(tableObserve.tableId)
+      const previousNoticeAt = this.retryNoticeAt.get(tableObserve.tableId) ?? 0
+      if (previousNoticeAt && Date.now() - previousNoticeAt < 30 * 60 * 1000) return
+      this.retryNoticeAt.set(tableObserve.tableId, Date.now())
+      const elapsedMinutes = Math.floor(state.elapsed / 60_000)
+      const summary = `游戏桌${tableObserve.tableId}连接异常（${state.reason}${state.status ? ` HTTP ${state.status}` : ''}，异常持续${elapsedMinutes}分钟），保留订阅并自动重试；下次尝试：${this.formatRetryTime(state.nextRetryAt)}`
+      for (const target of [...tableObserve.subscribers]) void this.safeSay(target, summary)
+    }).on('recovered', (state: ObserverRecoveredEvent) => {
+      this.retryNoticeAt.delete(tableObserve.tableId)
+      for (const target of [...tableObserve.subscribers]) {
+        const elapsedMinutes = Math.floor(state.elapsedMs / 60_000)
+        void this.safeSay(target, `游戏桌${tableObserve.tableId}连接已恢复（中断${elapsedMinutes}分钟）`)
+      }
+      this.reportCurrentState(tableObserve)
+    }).on('paused', (state: ObserverPausedEvent) => {
+      this.retryNoticeAt.delete(tableObserve.tableId)
+      const elapsedMinutes = Math.floor(state.elapsedMs / 60_000)
+      const summary = `游戏桌${tableObserve.tableId}观测已暂停（${state.reason}${state.status ? ` HTTP ${state.status}` : ''}，${state.stage}；异常持续${elapsedMinutes}分钟），订阅已保留；请管理员检查后重新发送「Ob ${tableObserve.tableId}」`
+      void this.sendAlarm(summary)
+      for (const target of [...tableObserve.subscribers]) void this.safeSay(target, summary)
     })
   }
 

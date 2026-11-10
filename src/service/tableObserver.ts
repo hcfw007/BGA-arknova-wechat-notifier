@@ -3,18 +3,43 @@ import axios, { AxiosInstance } from "axios"
 import { EventEmitter } from "events"
 import { BgaPlayerResult, getExpectedPlayers, resultFromTableInfo } from "../helper/bgaPayload"
 import { BgaCredentials, handshake } from "../helper/bgaSession"
+import { classifyObserverFailure, retryDelayForFailure, ObserverFailure, sanitizeEndpoint } from "../helper/observerRetry"
 import { Logger } from "../helper/logger"
 
 const POLL_INTERVAL_MS = 60 * 1000
 // BGA 匿名会话大约两小时失效，到期前主动换一把
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000
-// 连续失败到这个次数才认定这桌真的挂了，中间的抖动靠重取会话自愈
-const MAX_POLL_FAILURES = 3
-// 首次握手的重试次数与退避基数（第 n 次失败后等 n × base）
-const INIT_MAX_ATTEMPTS = 3
-const INIT_RETRY_BASE_MS = 3000
+const MAX_TIMER_DELAY_MS = 2_147_000_000
 
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+export type ObserverStatus =
+  | { kind: 'initializing' }
+  | { kind: 'ready' }
+  | { kind: 'retrying'; failure: ObserverFailure; nextRetryAt: number; elapsed: number; inFlight: boolean }
+  | { kind: 'paused'; failure: ObserverFailure; elapsedMs: number }
+  | { kind: 'closed' }
+  | { kind: 'terminal' }
+
+export interface ObserverRetryingEvent extends ObserverFailure {
+  stage: 'initial' | 'poll'
+  failures: number
+  nextRetryAt: number
+  elapsed: number
+  reminder?: boolean
+  manual?: boolean
+}
+
+export interface ObserverPausedEvent extends ObserverFailure {
+  stage: 'initial' | 'poll'
+  failures: number
+  elapsedMs: number
+}
+
+export interface ObserverRecoveredEvent {
+  stage: 'initial' | 'poll'
+  wasReady: boolean
+  isInitialRecovery: boolean
+  elapsedMs: number
+}
 
 interface BgaSession extends BgaCredentials {
   obtainedAt: number
@@ -37,11 +62,21 @@ export class TableObserver extends EventEmitter {
 
   private playerIdToName: Record<string, string> = {}
   private gameUrl?: string
-  private pollTimer?: NodeJS.Timeout
   private http: AxiosInstance
   private session?: BgaSession
   private consecutiveFailures = 0
   private polling = false
+  private retryTimer?: NodeJS.Timeout
+  private reminderTimer?: NodeJS.Timeout
+  private retryStartedAt?: number
+  private abortController?: AbortController
+  private requestEndpoint?: string
+  private closed = false
+  private initialized = false
+  private terminal = false
+  private paused = false
+  private pausedElapsedMs = 0
+  private generation = 0
 
   constructor(
     readonly tableId: string,
@@ -57,31 +92,88 @@ export class TableObserver extends EventEmitter {
     })
   }
 
-  /** BGA 偶发 502，首次握手失败不该直接判这桌死刑 */
-  async init() {
-    for (let attempt = 1; attempt <= INIT_MAX_ATTEMPTS; attempt++) {
-      try {
-        await this.initOnce()
-        return
-      } catch (e) {
-        this.logger.warn(`init [table ${this.tableId}] attempt ${attempt}/${INIT_MAX_ATTEMPTS} failed: ${e}`)
-        this.session = undefined
-        this.sharedCookie = undefined
-        if (attempt < INIT_MAX_ATTEMPTS) {
-          await delay(INIT_RETRY_BASE_MS * attempt)
-        }
-      }
+  async init(): Promise<void> {
+    if (this.closed || this.initialized || this.retryTimer || this.polling) return
+    await this.runAttempt('initial')
+  }
+
+  retryNow(): void {
+    if (this.closed || this.terminal || !this.paused) return
+    this.paused = false
+    this.pausedElapsedMs = 0
+    this.consecutiveFailures = 0
+    this.retryStartedAt = Date.now()
+    this.nextRetryAt = Date.now()
+    const stage = this.ready ? 'poll' : 'initial'
+    if (this.lastFailure) {
+      const event: ObserverRetryingEvent = { ...this.lastFailure, stage, failures: 0, nextRetryAt: this.nextRetryAt, elapsed: 0, manual: true }
+      this.emit('retrying', event)
     }
-    this.logger.error(`init [table ${this.tableId}] gave up after ${INIT_MAX_ATTEMPTS} attempts`)
-    this.emit('error')
+    this.scheduleReminder()
+    void this.runAttempt(stage)
+  }
+
+  get status(): ObserverStatus {
+    if (this.closed) return { kind: 'closed' }
+    if (this.terminal) return { kind: 'terminal' }
+    if (this.paused && this.lastFailure) return { kind: 'paused', failure: this.lastFailure, elapsedMs: this.pausedElapsedMs }
+    if (this.lastFailure && this.retryStartedAt !== undefined) {
+      return { kind: 'retrying', failure: this.lastFailure, nextRetryAt: this.nextRetryAt, elapsed: Date.now() - this.retryStartedAt, inFlight: this.polling }
+    }
+    return this.ready ? { kind: 'ready' } : { kind: 'initializing' }
+  }
+
+  private lastFailure?: ObserverFailure
+  private nextRetryAt = 0
+
+  private async runAttempt(stage: 'initial' | 'poll'): Promise<void> {
+    if (this.closed || this.terminal || this.polling) return
+    this.polling = true
+    const generation = this.generation
+    const wasInitialized = this.initialized
+    const wasReady = this.ready
+    this.abortController = new AbortController()
+    this.http.defaults.signal = this.abortController.signal
+    try {
+      if (stage === 'initial') await this.initOnce()
+      else await this.pollOnce()
+      if (this.isStale(generation)) return
+      const recovered = this.lastFailure !== undefined
+      const elapsedMs = recovered && this.retryStartedAt !== undefined ? Date.now() - this.retryStartedAt : 0
+      this.lastFailure = undefined
+      this.consecutiveFailures = 0
+      this.initialized = this.ready
+      this.retryStartedAt = undefined
+      this.nextRetryAt = 0
+      this.stopReminder()
+      if (recovered) {
+        const event: ObserverRecoveredEvent = { stage, wasReady, isInitialRecovery: stage === 'initial' && !wasReady, elapsedMs }
+        this.emit('recovered', event)
+      }
+      else if (this.ready && !wasInitialized) this.emit('ready')
+      if (this.ready) this.schedule(POLL_INTERVAL_MS, 'poll')
+    } catch (error: unknown) {
+      if (this.isStale(generation)) return
+      this.handleFailure(error, stage)
+    } finally {
+      this.polling = false
+      if (this.http.defaults.signal === this.abortController?.signal) this.http.defaults.signal = undefined
+      this.abortController = undefined
+    }
+  }
+
+  private isStale(generation: number): boolean {
+    return this.closed || this.terminal || generation !== this.generation
   }
 
   private async initOnce() {
     this.logger.info('init: getting session and token')
     const { cookie, token } = await this.ensureSession()
+    if (this.closed || this.terminal) return
     this.logger.info('init: got session, fetching table info')
 
     const tableInfo = await this.fetchTableInfo(cookie, token)
+    if (this.closed || this.terminal) return
     if (!tableInfo) {
       throw new Error('tableinfos returned no data')
     }
@@ -89,15 +181,16 @@ export class TableObserver extends EventEmitter {
     if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
       const result = resultFromTableInfo(tableInfo)
       if (result) {
-        this.emit('end', result)
+        this.finish(result)
         return
       }
       if (tableInfo.gameserver && tableInfo.game_name) {
         this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
         const state = await this.fetchGameState(cookie).catch(() => null)
-        this.emit('end', state?.args?.result ?? [])
+        if (this.closed || this.terminal) return
+        this.finish(state?.args?.result ?? [])
       } else {
-        this.emit('end', [])
+        this.finish([])
       }
       return
     }
@@ -112,8 +205,6 @@ export class TableObserver extends EventEmitter {
       this.currentPlayers = expectedPlayers
       this.waitingForJoin = true
       this.ready = true
-      this.emit('ready')
-      this.startPolling()
       return
     }
 
@@ -121,6 +212,7 @@ export class TableObserver extends EventEmitter {
     this.logger.info(`init: got table info, fetching game state from ${this.gameUrl}`)
 
     const state = await this.fetchGameState(cookie)
+    if (this.closed || this.terminal) return
     if (!state) {
       throw new Error('could not get initial game state')
     }
@@ -128,13 +220,73 @@ export class TableObserver extends EventEmitter {
     this.logger.info('init: got game state, ready')
     this.applyState(state)
     this.ready = true
-    this.emit('ready')
-    this.startPolling()
   }
 
   close() {
+    this.closed = true
+    this.generation++
     this.stopPolling()
+    this.stopReminder()
+    this.abortController?.abort()
     this.ready = false
+  }
+
+  private finish(result: { name: string; score: string; rank: number }[]): void {
+    if (this.closed || this.terminal) return
+    this.terminal = true
+    this.stopPolling()
+    this.stopReminder()
+    this.abortController?.abort()
+    this.emit('end', result)
+  }
+
+  private handleFailure(error: unknown, stage: 'initial' | 'poll'): void {
+    const failure = classifyObserverFailure(error)
+    failure.endpoint ??= sanitizeEndpoint(this.requestEndpoint)
+    this.lastFailure = failure
+    this.consecutiveFailures++
+    this.session = undefined
+    this.sharedCookie = undefined
+    this.retryStartedAt ??= Date.now()
+    if (!failure.retryable) {
+      this.paused = true
+      this.stopReminder()
+      this.pausedElapsedMs = Date.now() - this.retryStartedAt
+      this.logger.error(`observer paused table=${this.tableId} stage=${stage} endpoint=${failure.endpoint ?? 'unknown'} reason=${failure.reason} status=${failure.status ?? 'none'} failures=${this.consecutiveFailures}`)
+      const event: ObserverPausedEvent = {
+        ...failure,
+        stage,
+        failures: this.consecutiveFailures,
+        elapsedMs: this.pausedElapsedMs,
+      }
+      this.emit('paused', event)
+      this.consecutiveFailures = 0
+      this.retryStartedAt = undefined
+      this.nextRetryAt = 0
+      return
+    }
+    const wait = retryDelayForFailure(this.consecutiveFailures, failure, Date.now())
+    this.nextRetryAt = Date.now() + wait
+    this.logger.warn(`observer retry table=${this.tableId} stage=${stage} endpoint=${failure.endpoint ?? 'unknown'} reason=${failure.reason} status=${failure.status ?? 'none'} failures=${this.consecutiveFailures} nextRetryAt=${this.nextRetryAt}`)
+    const event: ObserverRetryingEvent = { ...failure, stage, failures: this.consecutiveFailures, nextRetryAt: this.nextRetryAt, elapsed: Date.now() - this.retryStartedAt }
+    this.emit('retrying', event)
+    this.schedule(wait, this.ready ? 'poll' : 'initial')
+    this.scheduleReminder()
+  }
+
+  private schedule(wait: number, stage: 'initial' | 'poll'): void {
+    if (this.closed || this.terminal) return
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    const delay = Math.min(wait, MAX_TIMER_DELAY_MS)
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined
+      if (Date.now() < this.nextRetryAt && this.lastFailure?.retryAfterMs !== undefined) {
+        this.schedule(this.nextRetryAt - Date.now(), stage)
+        return
+      }
+      this.nextRetryAt = Date.now()
+      void this.runAttempt(stage)
+    }, delay)
   }
 
   getContactFromPlayer(player: string) {
@@ -152,48 +304,41 @@ export class TableObserver extends EventEmitter {
       .map(id => this.playerIdToName[id] ?? id)
   }
 
-  private startPolling() {
-    if (!this.pollTimer) {
-      this.pollTimer = setInterval(() => void this.poll(), POLL_INTERVAL_MS)
-    }
-  }
-
   private stopPolling() {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer)
-      this.pollTimer = undefined
-    }
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = undefined
   }
 
-  private async poll() {
-    // BGA 慢起来单轮可能超过 POLL_INTERVAL_MS，setInterval 不会等上一轮，必须自己挡重入
-    if (this.polling) {
-      this.logger.warn(`poll [table ${this.tableId}] skipped: previous round still running`)
-      return
-    }
-    this.polling = true
-    try {
-      await this.pollOnce()
-      this.consecutiveFailures = 0
-    } catch (e) {
-      this.consecutiveFailures++
-      this.logger.warn(`poll [table ${this.tableId}] failed (${this.consecutiveFailures}/${MAX_POLL_FAILURES}): ${e}`)
-      // 多数失败是会话过期或 BGA 抖动，连旧 cookie 一起丢掉，下一轮干净地重新握手
-      this.session = undefined
-      this.sharedCookie = undefined
-      if (this.consecutiveFailures >= MAX_POLL_FAILURES) {
-        this.logger.error(`poll [table ${this.tableId}] gave up after ${this.consecutiveFailures} failures`)
-        this.stopPolling()
-        this.emit('error')
+  private scheduleReminder(): void {
+    if (this.reminderTimer) return
+    if (this.closed || this.terminal || this.paused || !this.lastFailure) return
+    this.reminderTimer = setTimeout(() => {
+      this.reminderTimer = undefined
+      const status = this.status
+      if (status.kind !== 'retrying') return
+      const event: ObserverRetryingEvent = {
+        ...status.failure,
+        stage: this.ready ? 'poll' : 'initial',
+        failures: this.consecutiveFailures,
+        nextRetryAt: status.nextRetryAt,
+        elapsed: status.elapsed,
+        reminder: true,
       }
-    } finally {
-      this.polling = false
-    }
+      this.emit('retrying', event)
+      this.scheduleReminder()
+    }, 30 * 60 * 1000)
+  }
+
+  private stopReminder(): void {
+    if (this.reminderTimer) clearTimeout(this.reminderTimer)
+    this.reminderTimer = undefined
   }
 
   private async pollOnce() {
     const { cookie, token } = await this.ensureSession()
+    if (this.closed || this.terminal) return
     const tableInfo = await this.fetchTableInfo(cookie, token)
+    if (this.closed || this.terminal) return
     if (!tableInfo) {
       throw new Error('tableinfos returned no data')
     }
@@ -202,11 +347,12 @@ export class TableObserver extends EventEmitter {
     if (status === 'finished' || status === 'archive') {
       const result = resultFromTableInfo(tableInfo)
       if (result) {
-        this.emit('end', result)
+        this.finish(result)
         return
       }
       const state = await this.fetchGameState(cookie).catch(() => null)
-      this.emit('end', state?.args?.result ?? [])
+      if (this.closed || this.terminal) return
+      this.finish(state?.args?.result ?? [])
       return
     }
 
@@ -219,7 +365,7 @@ export class TableObserver extends EventEmitter {
       if (prevPlayers) {
         const prevSet = new Set(prevPlayers)
         const newPlayers = expectedPlayers.filter(p => !prevSet.has(p))
-        if (newPlayers.length > 0) {
+        if (newPlayers.length > 0 && !this.lastFailure) {
           this.emit('newPlayerMove', newPlayers)
         }
       }
@@ -233,6 +379,7 @@ export class TableObserver extends EventEmitter {
     }
 
     const state = await this.fetchGameState(cookie)
+    if (this.closed || this.terminal) return
     if (!state) {
       // 进行中的桌子读不到 gamestate，通常意味着被重定向到登录页，按失败处理以触发换会话
       throw new Error('could not parse gamestate from game page')
@@ -245,7 +392,7 @@ export class TableObserver extends EventEmitter {
     if (prevPlayers) {
       const prevSet = new Set(prevPlayers)
       const newPlayers = (this.currentPlayers ?? []).filter(p => !prevSet.has(p))
-      if (newPlayers.length > 0) {
+      if (newPlayers.length > 0 && !this.lastFailure) {
         this.logger.info(`new active players: ${newPlayers}`)
         this.emit('newPlayerMove', newPlayers)
       }
@@ -261,6 +408,7 @@ export class TableObserver extends EventEmitter {
       this.sharedCookie = undefined
     }
     this.logger.info(`refreshing BGA session for table ${this.tableId}`)
+    this.requestEndpoint = `https://en.boardgamearena.com/table?table=${this.tableId}`
     const { cookie, token } = await this.getSessionAndToken()
     this.session = { cookie, token, obtainedAt: Date.now() }
     return this.session
@@ -272,6 +420,7 @@ export class TableObserver extends EventEmitter {
       `https://en.boardgamearena.com/table?table=${this.tableId}`,
       this.sharedCookie,
     )
+    if (this.closed || this.terminal) return credentials
     this.sharedCookie = credentials.cookie
     this.onCookieUpdate?.(credentials.cookie)
     return credentials
@@ -279,6 +428,7 @@ export class TableObserver extends EventEmitter {
 
   private async fetchTableInfo(cookie: string, token: string) {
     const tablePageUrl = `https://en.boardgamearena.com/table?table=${this.tableId}`
+    this.requestEndpoint = `https://en.boardgamearena.com/table/table/tableinfos.html?id=${this.tableId}`
     const res = await this.http.get(
       `https://en.boardgamearena.com/table/table/tableinfos.html?id=${this.tableId}`,
       {
@@ -296,6 +446,7 @@ export class TableObserver extends EventEmitter {
 
   private async fetchGameState(cookie: string): Promise<BgaGameState | null> {
     if (!this.gameUrl) return null
+    this.requestEndpoint = this.gameUrl
     const res = await this.http.get(this.gameUrl, { headers: { Cookie: cookie } })
     return this.parseGameState(res.data as string)
   }

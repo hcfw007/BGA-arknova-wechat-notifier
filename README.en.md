@@ -30,6 +30,14 @@ Everything runs on an anonymous BGA session — **no BGA account and no browser 
 
 `<tableId>` is the numeric ID at the end of the BGA table URL, e.g. `https://boardgamearena.com/table?table=123456789` → `123456789`.
 
+### Automatic recovery
+
+Table observation keeps its subscriptions when BGA returns HTTP 5xx, rate-limits requests (429), or encounters a transient network failure. Both initial connection and ongoing polling retry with approximately **1, 2, 4, 8, then 15 minutes** between attempts, including a small random jitter. Valid `Retry-After` headers can require a longer wait.
+
+Each subscribed room receives a notice on the first failure, reminders every 30 minutes during the outage, and a recovery notice followed by the current state. Reminders also run during long `Retry-After` waits without sending requests early. Recovery does not replay turns missed during the outage. Successful observation resumes the usual 60-second polling interval.
+
+Other HTTP 4xx responses and parsing errors pause observation for manual attention without deleting subscriptions. Send `ob <tableId>` again to retry. Stopping observation or finishing a game cancels pending retries.
+
 ### Subscribe to a player
 
 | Command | Effect |
@@ -116,16 +124,16 @@ The image is based on `node:20-alpine`, runs `npm install && npm run dist` durin
 ## Development
 
 ```bash
-npm test         # Unit tests (Node's built-in test runner + ts-node, no extra deps)
+TS_NODE_PROJECT=tsconfig.test.json node --max-old-space-size=2048 --test --test-concurrency=4 --require ts-node/register tests/*.spec.ts
 ```
 
-Tests cover the pure helpers only — command parsing, BGA payload parsing, state-file migration. Nothing touching Wechaty or the network is covered.
+Tests cover command parsing, BGA payload parsing, state-file migration, retry policy, and observation recovery. Network-dependent tests use mocked responses rather than live BGA requests.
 
 ## Layout
 
 - `src/index.ts` — Boots the Wechaty bot, handles QR-code login, and creates the single `RoomWorker`.
 - `src/service/roomWorker.ts` — Parses commands from WeChat messages, owns both the per-table and per-player subscription lists, starts/stops `TableObserver` instances, periodically scans subscribed players for new tables, and resolves BGA player names to WeChat contacts for `@` mentions.
-- `src/service/tableObserver.ts` — One instance per table; HTTP-polls BGA every 60s. Events: `ready` / `newPlayerMove` / `end` / `error`.
+- `src/service/tableObserver.ts` — One instance per table; HTTP-polls BGA every 60s, with automatic backoff during transient failures. Events include `ready`, `newPlayerMove`, `end`, `retrying`, `recovered`, and `paused`.
 - `src/service/playerClient.ts` — Player-level BGA queries: resolve a username to an id, list a player's in-progress Ark Nova tables.
 - `src/config.ts` — Loads and validates env vars; exports `config` and `playerMap`.
 - `src/helper/` — Command parsing, BGA session handshake and payload parsing, state-file IO, logger.

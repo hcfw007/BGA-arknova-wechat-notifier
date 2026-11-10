@@ -14,7 +14,7 @@ npm test        # Unit tests (node:test + ts-node, no extra deps)
 
 ## Tests
 
-`tests/*.spec.ts` run on Node's built-in test runner via `ts-node/register`, type-checked against `tsconfig.test.json`. Coverage is limited to the pure helpers — `parseCommand`, `looksLikePlayerId`, `mergeCookies`, `resultFromTableInfo`, `getExpectedPlayers`, `arkNovaTablesFromPlayerTables`, `pickExactPlayer`, `parseObState`. Anything touching Wechaty or the network is not covered.
+`tests/*.spec.ts` run on Node's built-in test runner via `ts-node/register`, type-checked against `tsconfig.test.json`. Tests cover the pure helpers, retry classification/backoff, observer lifecycle with fake timers and Axios adapters, and RoomWorker status notifications and subscription persistence with test doubles. Tests do not contact live BGA or WeChat services. Limit test concurrency to 4 and Node heap size to 2048 MB.
 
 Two config details matter:
 
@@ -52,15 +52,14 @@ WeChat bot that watches Board Game Arena (BGA) Ark Nova tables and @-mentions th
    - Private-chat commands are only honored from the `ALARM_CONTACT_ID` contact. **Room commands require an @-mention of the bot** (`isMentioningSelf`, which trusts `message.mentionSelf()` and falls back to searching `text()` for `@<bot name>` when the puppet gives no `mentionIdList`).
    - `safeSay` must never forward an `undefined` second argument to `say()`. `Room.say` treats trailing arguments as a variadic mention list, so `say(text, undefined)` becomes `mentionList: [undefined]` and throws `mentionList must be contact when not using TemplateStringsArray function call.` — which silently killed *every* plain-text room reply.
    - Multiple subscribers (rooms/contacts) can share one `TableObserver`. Subscribers are compared **by `.id`**, not by object identity, because a `Room`/`Contact` resolved during state restore is not the same instance as the one carried by an incoming message. When the last subscriber leaves, the observer is closed and its entry is dropped from `tableObserveList`.
-   - All outgoing messages go through `RoomWorker.safeSay`, which swallows and logs send failures; `sendAlarm` notifies `ALARM_CONTACT_ID` when an observer errors out or a table fails to restore.
+   - All outgoing messages go through `RoomWorker.safeSay`, which isolates per-recipient send failures; `sendAlarm` notifies `ALARM_CONTACT_ID` when an observer is permanently paused or a table fails to restore.
    - On start, prefetches an anonymous BGA session cookie via `axios` (`https://en.boardgamearena.com/`) and refreshes it every 2 hours (`BGA_SESSION_TTL_MS`). The cookie is shared with each new `TableObserver`.
 3. `src/service/tableObserver.ts` — One instance per BGA table. **HTTP polling, no browser.**
    - Uses `axios` to fetch table info and game state directly from BGA, authenticated with the shared cookie + a CSRF token scraped from the page.
    - Polls every `POLL_INTERVAL_MS` (60s) once `ready`. The session (cookie + CSRF token) lives in the observer and is re-fetched by `ensureSession()` once it is older than `SESSION_TTL_MS` (2h) — it is no longer frozen in the polling closure.
-   - Every poll is wrapped in try/catch. A failure drops the cached session/cookie so the next tick re-handshakes; only after `MAX_POLL_FAILURES` (3) consecutive failures does the observer stop polling and emit `error`. Cookie strings are merged by name (`mergeCookies`) so refreshes don't accumulate duplicates, and a TTL-triggered refresh discards the old cookie — otherwise BGA hands the same session straight back.
-   - `init()` retries `initOnce()` up to `INIT_MAX_ATTEMPTS` (3) with linear backoff before emitting `error`. BGA returns sporadic 502s and 30s timeouts on the table page; without this a single blip killed the whole subscription.
-   - `poll()` guards against re-entry with a `polling` flag: a slow round (up to 3 requests × 30s timeout) can outlast the 60s interval, and `setInterval` does not wait.
-   - Emits: `ready`, `newPlayerMove` (with new active-player list), `end` (with result payload), `error`.
+   - Transient HTTP 5xx/429 and known network/connection timeout errors retry during initialization and polling; the ordinary backoff base caps at 15 minutes with ±10% jitter, while a valid `Retry-After` is honored even beyond that cap. A separate reminder timer reports prolonged outages every 30 minutes without triggering a request. Successful full rounds reset the failure count. Permanent HTTP/client or response parsing failures emit `paused` and retain the subscription for manual `ob <tableId>` recovery.
+   - A single-shot timer schedules polling/retries, preventing overlap. Every request shares the current AbortSignal; close/end aborts in-flight work and prevents late results from emitting events or updating the shared cookie.
+   - Emits: `ready`, `newPlayerMove` (with new active-player list), `retrying` (sanitized retry status/deadline), `recovered`, `paused`, `end` (with result payload).
    - Final scores come from `tableinfos.html` → `data.result.player` (BGA redirects the game page of finished tables back to `/table`, so the old gamestate-scraping path only remains as a fallback).
    - Updates the shared cookie via an `onCookieUpdate` callback when a fresh `set-cookie` comes back.
 4. `src/service/playerClient.ts` — Player-level BGA queries, **anonymous, no login needed**.
