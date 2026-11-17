@@ -293,7 +293,9 @@ describe('TableObserver retry lifecycle', () => {
     internals.http.defaults.adapter = async config => {
       if (config.url?.includes('tableinfos.html')) {
         tableInfoRequests++
-        return makeResponse(config, tableInfoRequests === 1 ? { data: {} } : { data: readyTableInfo })
+        // 原先用 { data: {} } 模拟永久错误；空 data 现在归为可恢复的坏响应，永久场景改用真实 HTTP 403
+        if (tableInfoRequests === 1) throw makeHttpError(config, 403)
+        return makeResponse(config, { data: readyTableInfo })
       }
       return makeResponse(config, 'requestToken: ' + 'd'.repeat(64), 200, { 'set-cookie': ['sid=safe; Path=/'] })
     }
@@ -337,6 +339,24 @@ describe('TableObserver retry lifecycle', () => {
     assert.equal(endEvents, 1)
     observer.close()
     timers.reset()
+  })
+
+  it('pauses on an explicit permanent BGA business error with its code', async () => {
+    const observer = new TableObserver('missing-table')
+    const internals = observer as unknown as ObserverInternals
+    internals.http.defaults.adapter = async config => {
+      if (config.url?.includes('tableinfos.html')) return makeResponse(config, { status: 0, error: 'This table does not exist', code: 100 })
+      return makeResponse(config, 'requestToken: ' + 'd'.repeat(64))
+    }
+    const paused = new Promise<{ reason: string; applicationCode?: string; status?: number }>(resolve => observer.once('paused', resolve))
+
+    await observer.init()
+    const event = await paused
+    observer.close()
+
+    assert.equal(event.reason, 'bga_error')
+    assert.equal(event.applicationCode, '100')
+    assert.equal(event.status, undefined)
   })
 
   it('does not emit a retry after close aborts an in-flight request', async () => {

@@ -1,4 +1,5 @@
 import { AxiosInstance } from "axios"
+import { extractRequestToken } from "./bgaResponse"
 import { mergeCookies } from "./cookie"
 
 export interface BgaCredentials {
@@ -22,10 +23,6 @@ export async function handshake(
     .join('; ')
   const cookie = mergeCookies(baseCookie, setCookie)
 
-  const tokenMatch = (res.data as string).match(/requestToken['":,\s]+([a-f0-9]{64})/)
-  if (!tokenMatch) {
-    throw new Error(`could not extract requestToken from ${pageUrl}`)
-  }
-
-  return { cookie, token: tokenMatch[1] }
+  // 没有 token 的页面通常是登录页或维护页，抛可重试的 BgaResponseError，错误里不带 pageUrl
+  return { cookie, token: extractRequestToken(res.data) }
 }

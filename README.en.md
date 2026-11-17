@@ -36,7 +36,9 @@ Table observation keeps its subscriptions when BGA returns HTTP 5xx, rate-limits
 
 Each subscribed room receives a notice on the first failure, reminders every 30 minutes during the outage, and a recovery notice followed by the current state. Reminders also run during long `Retry-After` waits without sending requests early. Recovery does not replay turns missed during the outage. Successful observation resumes the usual 60-second polling interval.
 
-Other HTTP 4xx responses and parsing errors pause observation for manual attention without deleting subscriptions. Send `ob <tableId>` again to retry. Stopping observation or finishing a game cancels pending retries.
+HTTP 200 responses whose body reports a failure are classified too. An expired session (application code 806 or "Invalid session information") is reported as `session_expired`; the observer drops the old cookie and token, performs a fresh handshake, and retries. BGA maintenance or busy notices (`bga_unavailable`) retry as well. Recognizable transient protocol problems retry as `invalid_response`: empty bodies, HTML login or maintenance pages, missing `data` or `players`, a page without a `requestToken`, or a missing or malformed `gamestate`. A top-level `status` other than 1 counts as a failure even when `data` is present; a response without a top-level `status` but with complete `data` is still accepted.
+
+Other HTTP 4xx responses, explicit BGA business errors (`bga_error`, with the application code recorded in logs), and internal program errors (`unexpected_error`) pause observation for manual attention without deleting subscriptions. Logs contain only the sanitized endpoint, reason, HTTP status, application code, and the error class and code location; they never contain cookies, tokens, response bodies, or raw error messages. Send `ob <tableId>` again to retry. Stopping observation or finishing a game cancels pending retries.
 
 ### Subscribe to a player
 

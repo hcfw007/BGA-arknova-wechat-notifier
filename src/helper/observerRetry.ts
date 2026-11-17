@@ -1,11 +1,47 @@
 import axios, { AxiosError } from 'axios'
 
+import { BgaResponseError } from './bgaResponse'
+
 export interface ObserverFailure {
   retryable: boolean
   reason: string
   status?: number
   retryAfterMs?: number
   endpoint?: string
+  /** BGA 正文里的业务错误码（如 806），与 HTTP status 无关 */
+  applicationCode?: string
+}
+
+const SAFE_ERROR_NAMES = new Set([
+  'Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError',
+  'AggregateError', 'AxiosError', 'CanceledError', 'BgaResponseError',
+])
+const SAFE_AXIOS_CODE = /^[A-Z0-9_]{1,40}$/
+const STACK_LOCATION = /(?:^|[\s(])((?:file:\/\/)?(?:\/|[A-Za-z]:[\\/])[^\s()?#]*:\d+:\d+)\)?$/
+const UNSAFE_PATH_CHARS = /[^\w./\\:@-]/g
+
+/** 第一条代码路径栈帧：跳过 message 行，忽略 node 内部帧和 URL，避免带出凭据 */
+function firstCodeFrame(stack: string | undefined): string {
+  for (const line of (stack ?? '').split('\n').slice(1)) {
+    const match = line.trim().match(STACK_LOCATION)
+    if (match) return match[1].replace(/^file:\/\//, '').replace(UNSAFE_PATH_CHARS, '')
+  }
+  return 'none'
+}
+
+/** 只输出白名单错误名、固定元信息和代码位置，不输出 message、响应体、URL 或请求头 */
+export function describeErrorSafely(error: unknown): string {
+  if (error instanceof BgaResponseError) {
+    const { stage, responseType, applicationCode, problem } = error.details
+    return `errorName=BgaResponseError stage=${stage} responseType=${responseType} code=${applicationCode ?? 'none'} problem=${problem ?? 'none'}`
+  }
+  if (axios.isAxiosError(error)) {
+    const code = typeof error.code === 'string' && SAFE_AXIOS_CODE.test(error.code) ? error.code : 'unrecognized'
+    return `errorName=AxiosError code=${code}`
+  }
+  if (!(error instanceof Error)) return 'errorName=non_error frame=none'
+  const name = SAFE_ERROR_NAMES.has(error.name) ? error.name : 'Error'
+  return `errorName=${name} frame=${firstCodeFrame(error.stack)}`
 }
 
 export function sanitizeEndpoint(rawUrl: string | undefined): string | undefined {
@@ -41,6 +77,12 @@ function parseRetryAfter(value: unknown, now: number): number | undefined {
 }
 
 export function classifyObserverFailure(error: unknown, now = Date.now()): ObserverFailure {
+  if (error instanceof BgaResponseError) {
+    const { applicationCode } = error.details
+    return applicationCode === undefined
+      ? { retryable: error.retryable, reason: error.reason }
+      : { retryable: error.retryable, reason: error.reason, applicationCode }
+  }
   if (!axios.isAxiosError(error)) return { retryable: false, reason: 'unexpected_error' }
   const axiosError: AxiosError<unknown> = error
   const endpoint = sanitizeEndpoint(axiosError.config?.url)

@@ -1,9 +1,10 @@
 import { Contact } from "@juzi/wechaty"
 import axios, { AxiosInstance } from "axios"
 import { EventEmitter } from "events"
-import { BgaPlayerResult, getExpectedPlayers, resultFromTableInfo } from "../helper/bgaPayload"
+import { getExpectedPlayers, resultFromTableInfo } from "../helper/bgaPayload"
+import { BgaGameState, BgaResponseError, BgaTableInfo, parseGameStatePage, parseTableInfoResponse } from "../helper/bgaResponse"
 import { BgaCredentials, handshake } from "../helper/bgaSession"
-import { classifyObserverFailure, retryDelayForFailure, ObserverFailure, sanitizeEndpoint } from "../helper/observerRetry"
+import { classifyObserverFailure, describeErrorSafely, retryDelayForFailure, ObserverFailure, sanitizeEndpoint } from "../helper/observerRetry"
 import { Logger } from "../helper/logger"
 
 const POLL_INTERVAL_MS = 60 * 1000
@@ -43,13 +44,6 @@ export interface ObserverRecoveredEvent {
 
 interface BgaSession extends BgaCredentials {
   obtainedAt: number
-}
-
-interface BgaGameState {
-  active_player: string
-  multiactive?: string[]
-  updateGameProgression?: number
-  args?: { result?: BgaPlayerResult[] }
 }
 
 export class TableObserver extends EventEmitter {
@@ -174,9 +168,6 @@ export class TableObserver extends EventEmitter {
 
     const tableInfo = await this.fetchTableInfo(cookie, token)
     if (this.closed || this.terminal) return
-    if (!tableInfo) {
-      throw new Error('tableinfos returned no data')
-    }
 
     if (tableInfo.status === 'finished' || tableInfo.status === 'archive') {
       const result = resultFromTableInfo(tableInfo)
@@ -185,7 +176,7 @@ export class TableObserver extends EventEmitter {
         return
       }
       if (tableInfo.gameserver && tableInfo.game_name) {
-        this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+        this.gameUrl = this.gameUrlFor(tableInfo)
         const state = await this.fetchGameState(cookie).catch(() => null)
         if (this.closed || this.terminal) return
         this.finish(state?.args?.result ?? [])
@@ -195,7 +186,7 @@ export class TableObserver extends EventEmitter {
       return
     }
 
-    for (const [id, player] of Object.entries(tableInfo.players as Record<string, { fullname: string }>)) {
+    for (const [id, player] of Object.entries(tableInfo.players)) {
       this.playerIdToName[id] = player.fullname
     }
 
@@ -208,14 +199,11 @@ export class TableObserver extends EventEmitter {
       return
     }
 
-    this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+    this.gameUrl = this.gameUrlFor(tableInfo)
     this.logger.info(`init: got table info, fetching game state from ${this.gameUrl}`)
 
     const state = await this.fetchGameState(cookie)
     if (this.closed || this.terminal) return
-    if (!state) {
-      throw new Error('could not get initial game state')
-    }
 
     this.logger.info('init: got game state, ready')
     this.applyState(state)
@@ -252,7 +240,7 @@ export class TableObserver extends EventEmitter {
       this.paused = true
       this.stopReminder()
       this.pausedElapsedMs = Date.now() - this.retryStartedAt
-      this.logger.error(`observer paused table=${this.tableId} stage=${stage} endpoint=${failure.endpoint ?? 'unknown'} reason=${failure.reason} status=${failure.status ?? 'none'} failures=${this.consecutiveFailures}`)
+      this.logger.error(`observer paused ${this.describeFailure(stage, failure, error)}`)
       const event: ObserverPausedEvent = {
         ...failure,
         stage,
@@ -267,11 +255,23 @@ export class TableObserver extends EventEmitter {
     }
     const wait = retryDelayForFailure(this.consecutiveFailures, failure, Date.now())
     this.nextRetryAt = Date.now() + wait
-    this.logger.warn(`observer retry table=${this.tableId} stage=${stage} endpoint=${failure.endpoint ?? 'unknown'} reason=${failure.reason} status=${failure.status ?? 'none'} failures=${this.consecutiveFailures} nextRetryAt=${this.nextRetryAt}`)
+    this.logger.warn(`observer retry ${this.describeFailure(stage, failure, error)} nextRetryAt=${this.nextRetryAt}`)
     const event: ObserverRetryingEvent = { ...failure, stage, failures: this.consecutiveFailures, nextRetryAt: this.nextRetryAt, elapsed: Date.now() - this.retryStartedAt }
     this.emit('retrying', event)
     this.schedule(wait, this.ready ? 'poll' : 'initial')
     this.scheduleReminder()
+  }
+
+  /** 日志用的安全摘要：HTTP status 与 BGA 业务码分开记录，诊断只含错误类别与代码位置 */
+  private describeFailure(stage: 'initial' | 'poll', failure: ObserverFailure, error: unknown): string {
+    return `table=${this.tableId} stage=${stage} endpoint=${failure.endpoint ?? 'unknown'} reason=${failure.reason} status=${failure.status ?? 'none'} code=${failure.applicationCode ?? 'none'} failures=${this.consecutiveFailures} ${describeErrorSafely(error)}`
+  }
+
+  private gameUrlFor(tableInfo: BgaTableInfo): string {
+    if (!tableInfo.gameserver || !tableInfo.game_name) {
+      throw new BgaResponseError('invalid_response', true, { stage: 'tableinfos', responseType: 'object', problem: 'game_location_missing' })
+    }
+    return `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
   }
 
   private schedule(wait: number, stage: 'initial' | 'poll'): void {
@@ -295,12 +295,12 @@ export class TableObserver extends EventEmitter {
   }
 
   private applyState(state: BgaGameState) {
-    const activeIds = (state.multiactive?.length ?? 0) > 0
-      ? state.multiactive!
-      : [state.active_player]
+    const activeIds: readonly string[] = state.multiactive && state.multiactive.length > 0
+      ? state.multiactive
+      : state.active_player === undefined ? [] : [state.active_player]
 
     this.currentPlayers = activeIds
-      .filter(id => id && id !== '0' && id !== '-1')
+      .filter(id => id !== '' && id !== '0' && id !== '-1')
       .map(id => this.playerIdToName[id] ?? id)
   }
 
@@ -339,9 +339,6 @@ export class TableObserver extends EventEmitter {
     if (this.closed || this.terminal) return
     const tableInfo = await this.fetchTableInfo(cookie, token)
     if (this.closed || this.terminal) return
-    if (!tableInfo) {
-      throw new Error('tableinfos returned no data')
-    }
 
     const status = tableInfo.status
     if (status === 'finished' || status === 'archive') {
@@ -373,17 +370,14 @@ export class TableObserver extends EventEmitter {
     }
 
     this.waitingForJoin = false
-    if (!this.gameUrl && tableInfo.gameserver && tableInfo.game_name) {
-      this.gameUrl = `https://boardgamearena.com/${tableInfo.gameserver}/${tableInfo.game_name}?table=${this.tableId}`
+    if (!this.gameUrl) {
+      this.gameUrl = this.gameUrlFor(tableInfo)
       this.logger.info(`poll: game started, url=${this.gameUrl}`)
     }
 
+    // 进行中的桌子读不到 gamestate，通常意味着被重定向到登录页；parseGameStatePage 抛可重试错误以触发换会话
     const state = await this.fetchGameState(cookie)
     if (this.closed || this.terminal) return
-    if (!state) {
-      // 进行中的桌子读不到 gamestate，通常意味着被重定向到登录页，按失败处理以触发换会话
-      throw new Error('could not parse gamestate from game page')
-    }
 
     const prevPlayers = this.currentPlayers
     this.applyState(state)
@@ -441,37 +435,16 @@ export class TableObserver extends EventEmitter {
         }
       }
     )
-    return (res.data as any)?.data ?? null
+    return parseTableInfoResponse(res.data)
   }
 
-  private async fetchGameState(cookie: string): Promise<BgaGameState | null> {
-    if (!this.gameUrl) return null
+  private async fetchGameState(cookie: string): Promise<BgaGameState> {
+    if (!this.gameUrl) {
+      throw new BgaResponseError('invalid_response', true, { stage: 'gamestate', responseType: 'undefined', problem: 'game_url_missing' })
+    }
     this.requestEndpoint = this.gameUrl
     const res = await this.http.get(this.gameUrl, { headers: { Cookie: cookie } })
-    return this.parseGameState(res.data as string)
-  }
-
-  private parseGameState(html: string): BgaGameState | null {
-    const marker = '"gamestate":{'
-    const idx = html.indexOf(marker)
-    if (idx === -1) return null
-
-    let depth = 0
-    const start = idx + marker.length - 1
-    let end = start
-    for (let i = start; i < html.length; i++) {
-      if (html[i] === '{') depth++
-      else if (html[i] === '}') {
-        depth--
-        if (depth === 0) { end = i + 1; break }
-      }
-    }
-
-    try {
-      return JSON.parse(html.slice(start, end))
-    } catch {
-      return null
-    }
+    return parseGameStatePage(res.data)
   }
 }
 
