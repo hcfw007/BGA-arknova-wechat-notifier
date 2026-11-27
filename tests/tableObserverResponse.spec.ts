@@ -238,3 +238,111 @@ describe('TableObserver BGA response failures', () => {
     assert.match(logs, /errorName=AxiosError/)
   })
 })
+
+interface EndResult {
+  name: string
+  score: string
+  score_aux: string
+  /** tableinfos 路径映射为 rank；gamestate 回退路径保留原始 gamerank */
+  rank?: number
+  gamerank?: string
+}
+
+function endResult(observer: TableObserver): Promise<EndResult[]> {
+  return new Promise(resolve => observer.once('end', resolve))
+}
+
+describe('TableObserver finished table results', () => {
+  it('reports final rankings from tableinfos as soon as the table finishes', async () => {
+    const finishedWithResult = {
+      status: 'finished',
+      players: { '1': { fullname: 'Alice' }, '2': { fullname: 'Bob' } },
+      result: {
+        player: [
+          { name: 'Bob', score: '95', score_aux: '2', gamerank: '2' },
+          { name: 'Alice', score: '120', score_aux: '0', gamerank: '1' },
+        ],
+      },
+    }
+    const observer = new TableObserver('finished-with-result')
+    captureLogs(observer)
+    setAdapter(observer, async config =>
+      config.url?.includes('tableinfos.html')
+        ? makeResponse(config, { status: 1, data: finishedWithResult })
+        : tokenPage(config, 1))
+    const ended = endResult(observer)
+
+    await observer.init()
+
+    assert.deepEqual(await ended, [
+      { name: 'Alice', score: '120', score_aux: '0', rank: 1 },
+      { name: 'Bob', score: '95', score_aux: '2', rank: 2 },
+    ])
+    assert.equal(observer.status.kind, 'terminal')
+    observer.close()
+  })
+
+  it('falls back to the game state page for final results', async (context) => {
+    const timers = context.mock.timers as unknown as FakeTimers
+    timers.enable({ apis: ['setTimeout', 'Date'], now: 60_000 })
+    const observer = new TableObserver('finished-fallback')
+    captureLogs(observer)
+    let tableInfoRequests = 0
+    let gameStateRequests = 0
+    setAdapter(observer, async config => {
+      if (config.url?.includes('tableinfos.html')) {
+        tableInfoRequests++
+        // 第二轮起终局不再带 data.result，只能回退到 gamestate 页面刮结果
+        return makeResponse(config, { status: 1, data: tableInfoRequests === 1 ? activeTable : { status: 'finished', players: { '1': { fullname: 'Alice' } } } })
+      }
+      if (config.url?.includes('/arknova')) {
+        gameStateRequests++
+        return makeResponse(config, gameStateRequests === 1
+          ? 'prefix "gamestate":{"active_player":"1"} suffix'
+          : 'prefix "gamestate":{"args":{"result":[{"name":"Alice","score":"120","score_aux":"0","gamerank":"1"}]}} suffix')
+      }
+      return tokenPage(config, 1)
+    })
+    const ended = endResult(observer)
+
+    await observer.init()
+    timers.tick(60_000)
+    await flushAsync()
+
+    // gamestate 回退路径原样透传 args.result，不做 tableinfos 路径的 gamerank→rank 映射
+    assert.deepEqual(await ended, [{ name: 'Alice', score: '120', score_aux: '0', gamerank: '1' }])
+    observer.close()
+    timers.reset()
+  })
+
+  it('ends with an empty result when neither source carries final scores', async () => {
+    const observer = new TableObserver('finished-empty')
+    captureLogs(observer)
+    setAdapter(observer, async config =>
+      config.url?.includes('tableinfos.html')
+        ? makeResponse(config, { status: 1, data: { status: 'finished', players: { '1': { fullname: 'Alice' } } } })
+        : tokenPage(config, 1))
+    const ended = endResult(observer)
+
+    await observer.init()
+
+    assert.deepEqual(await ended, [])
+    observer.close()
+  })
+
+  it('retries an ongoing table that lost its game location as invalid_response', async () => {
+    const observer = new TableObserver('no-game-location')
+    captureLogs(observer)
+    setAdapter(observer, async config =>
+      config.url?.includes('tableinfos.html')
+        ? makeResponse(config, { status: 1, data: { status: 'asyncplay', players: { '1': { fullname: 'Alice' } } } })
+        : tokenPage(config, 1))
+    const retry = nextFailure(observer, 'retrying')
+
+    await observer.init()
+    const event = await retry
+    observer.close()
+
+    assert.equal(event.reason, 'invalid_response')
+  })
+})

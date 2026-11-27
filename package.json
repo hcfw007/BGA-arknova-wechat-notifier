@@ -21,11 +21,11 @@
   },
   "homepage": "https://github.com/hcfw007/BGA-arknova-wechat-notifier#readme",
   "dependencies": {
-    "@grpc/grpc-js": "1.8.12",
+    "@grpc/grpc-js": "1.14.7",
     "@juzi/wechaty": "^1.0.141",
     "@juzi/wechaty-puppet": "^1.0.132",
     "@juzi/wechaty-puppet-service": "^1.0.113",
-    "axios": "^1.14.0",
+    "axios": "^1.21.1",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
