@@ -1,0 +1,33 @@
+# 测试流水线：每个 push / PR 都要过 typecheck + 单测。
+# 发布相关的编译与 Docker 构建仍由 publish.yml 负责，本文件与之并存、互不依赖。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Type-check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 与 Dockerfile 的 node:20-alpine 保持一致
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit -p tsconfig.test.json
+
+      - name: Unit tests
+        run: npm test
